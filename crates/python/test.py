@@ -1,13 +1,13 @@
 from heimdall_py import decompile_code
 
-with open("crates/python/contracts/vault.bin", "r") as f:
-    vault = f.readline()
+with open("contracts/vault.bin", "r") as f:
+    vault = f.readline().strip()
 
-with open("crates/python/contracts/weth.bin", "r") as f:
-    weth = f.readline()
+with open("contracts/weth.bin", "r") as f:
+    weth = f.readline().strip()
 
 for bytecode in [vault, weth]:
-    abi = decompile_code(bytecode)
+    abi = decompile_code(bytecode, skip_resolving=True)
 
     # Display functions
     print("\nFunctions:")
