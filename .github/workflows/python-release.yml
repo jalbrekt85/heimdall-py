@@ -34,15 +34,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.sha }}
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --interpreter python${{ matrix.python-version }}
+          args: --release --out dist --interpreter python${{ matrix.python-version }} --compatibility manylinux_2_28
           sccache: 'true'
           manylinux: auto
           working-directory: crates/python
