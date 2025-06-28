@@ -42,14 +42,15 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --interpreter python${{ matrix.python-version }} --manifest-path crates/python/Cargo.toml
+          args: --release --out dist --interpreter python${{ matrix.python-version }}
           sccache: 'true'
           manylinux: auto
+          working-directory: crates/python
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
           name: wheels
-          path: dist
+          path: crates/python/dist
 
   windows:
     runs-on: windows-latest
@@ -70,13 +71,14 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --interpreter python${{ matrix.python-version }} --manifest-path crates/python/Cargo.toml
+          args: --release --out dist --interpreter python${{ matrix.python-version }}
           sccache: 'true'
+          working-directory: crates/python
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
           name: wheels
-          path: dist
+          path: crates/python/dist
 
   macos:
     runs-on: macos-latest
@@ -96,13 +98,14 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --interpreter python${{ matrix.python-version }} --manifest-path crates/python/Cargo.toml
+          args: --release --out dist --interpreter python${{ matrix.python-version }}
           sccache: 'true'
+          working-directory: crates/python
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
           name: wheels
-          path: dist
+          path: crates/python/dist
 
   sdist:
     runs-on: ubuntu-latest
@@ -114,12 +117,13 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: sdist
-          args: --out dist --manifest-path crates/python/Cargo.toml
+          args: --out dist
+          working-directory: crates/python
       - name: Upload sdist
         uses: actions/upload-artifact@v4
         with:
           name: wheels
-          path: dist
+          path: crates/python/dist
 
   release:
     name: Release
