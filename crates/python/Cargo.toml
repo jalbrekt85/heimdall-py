@@ -24,5 +24,6 @@ alloy-json-abi = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+
 [build-dependencies]
 pyo3-build-config = "0.20.0"
