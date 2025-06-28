@@ -3,6 +3,7 @@ use alloy_dyn_abi::{DynSolType, DynSolValue};
 use futures::future::BoxFuture;
 use heimdall_common::utils::strings::encode_hex_reduced;
 use heimdall_vm::core::vm::State;
+use tracing::debug;
 
 use crate::{
     core::analyze::AnalyzerState,
@@ -72,6 +73,11 @@ pub(crate) fn solidity_heuristic<'a>(
                 let key = instruction.inputs[0];
                 let value = instruction.inputs[1];
                 let operation = instruction.input_operations[1].to_owned();
+
+                debug!(
+                    "MSTORE at offset {} with value {} (opcode: {:02x}) for function {}",
+                    key, value, operation.opcode, function.selector
+                );
 
                 // add the mstore to the function's memory map
                 function.memory.insert(key, StorageFrame { operation, value });

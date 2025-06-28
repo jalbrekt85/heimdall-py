@@ -100,6 +100,7 @@ impl Analyzer {
             }
             AnalyzerType::Abi => {
                 self.heuristics.push(Heuristic::new(event_heuristic));
+                self.heuristics.push(Heuristic::new(solidity_heuristic)); // Add memory tracking
                 self.heuristics.push(Heuristic::new(argument_heuristic));
                 self.heuristics.push(Heuristic::new(modifier_heuristic));
             }

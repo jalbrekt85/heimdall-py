@@ -1,0 +1,30 @@
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "heimdall-py"
+description = "Python bindings for Heimdall - Advanced EVM bytecode analysis toolkit"
+requires-python = ">=3.10"
+dynamic = ["version"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Disassemblers",
+    "Topic :: Security",
+    "License :: OSI Approved :: MIT License",
+]
+dependencies = []
+readme = "README.md"
+license = {text = "MIT"}
+keywords = ["ethereum", "evm", "decompiler", "bytecode", "smart-contracts"]
+
+[project.urls]
+Homepage = "https://github.com/jalbrekt85/heimdall-py"
+Repository = "https://github.com/jalbrekt85/heimdall-py"
+Issues = "https://github.com/jalbrekt85/heimdall-py/issues"

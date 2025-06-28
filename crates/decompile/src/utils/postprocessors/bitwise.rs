@@ -55,7 +55,7 @@ pub(crate) fn bitwise_mask_postprocessor(
                         "bytes1".to_string()
                     }
                 }
-                _ => cast_types[0].to_owned(),
+                _ => cast_types[0].to_owned()
             };
 
             // apply the cast to the subject
@@ -95,7 +95,7 @@ pub(crate) fn bitwise_mask_postprocessor(
                         "bytes1".to_string()
                     }
                 }
-                _ => cast_types[0].to_owned(),
+                _ => cast_types[0].to_owned()
             };
 
             // apply the cast to the subject

@@ -5,7 +5,7 @@ use alloy::primitives::U256;
 use eyre::eyre;
 use heimdall_common::utils::strings::find_balanced_encapsulator;
 use heimdall_vm::core::{
-    opcodes::{opcode_name, CALLDATALOAD, ISZERO},
+    opcodes::{opcode_name, wrapped::WrappedInput, CALLDATALOAD, ISZERO},
     types::{byte_size_to_type, convert_bitmask},
     vm::State,
 };
@@ -17,6 +17,29 @@ use crate::{
     utils::constants::{AND_BITMASK_REGEX, AND_BITMASK_REGEX_2, STORAGE_ACCESS_REGEX},
     Error,
 };
+
+use heimdall_vm::core::opcodes::wrapped::WrappedOpcode;
+
+fn contains_push20(operation: &WrappedOpcode, depth: u32) -> bool {
+    if depth > 16 {
+        return false;
+    }
+    
+    if operation.opcode == 0x73 {
+        return true;
+    }
+    
+    // Recursively check all inputs
+    for input in &operation.inputs {
+        if let WrappedInput::Opcode(wrapped_op) = input {
+            if contains_push20(wrapped_op, depth + 1) {
+                return true;
+            }
+        }
+    }
+    
+    false
+}
 
 pub(crate) fn argument_heuristic<'a>(
     function: &'a mut AnalyzedFunction,
@@ -132,6 +155,14 @@ pub(crate) fn argument_heuristic<'a>(
                 if return_memory_operations.iter().any(|x| x.operation.opcode == ISZERO) {
                     function.returns = Some(String::from("bool"));
                 }
+                // if the input op is any of the following, it is an address return
+                // this is because these push address values onto the stack
+                else if return_memory_operations
+                    .iter()
+                    .any(|x| [0x30, 0x32, 0x33, 0x41, 0x73].contains(&x.operation.opcode))
+                {
+                    function.returns = Some(String::from("address"));
+                }
                 // if the input op is any of the following, it is a uint256 return
                 // this is because these push numeric values onto the stack
                 else if return_memory_operations.iter().any(|x| {
@@ -139,14 +170,6 @@ pub(crate) fn argument_heuristic<'a>(
                         .contains(&x.operation.opcode)
                 }) {
                     function.returns = Some(String::from("uint256"));
-                }
-                // if the input op is any of the following, it is an address return
-                // this is because these push address values onto the stack
-                else if return_memory_operations
-                    .iter()
-                    .any(|x| [0x30, 0x32, 0x33, 0x41].contains(&x.operation.opcode))
-                {
-                    function.returns = Some(String::from("address"));
                 }
                 // if the size of returndata is > 32, it must be a bytes or string return.
                 else if size > 32 {
@@ -160,34 +183,156 @@ pub(crate) fn argument_heuristic<'a>(
                         function.returns = Some(String::from("bytes memory"));
                     }
                 } else {
-                    // attempt to find a return type within the return memory operations
-                    let byte_size = match AND_BITMASK_REGEX
-                        .find(&return_memory_operations_solidified)
-                        .ok()
-                        .flatten()
-                    {
-                        Some(bitmask) => {
-                            let cast = bitmask.as_str();
-
-                            cast.matches("ff").count()
+                    // If we have no memory operations and this is a parameterless function,
+                    // it's likely returning a constant
+                    if return_memory_operations.is_empty() && function.arguments.is_empty() && size == 32 {
+                        debug!(
+                            "Checking for constant return: no memory ops, no args, size=32"
+                        );
+                        
+                        // Check if we have any memory operations that might contain an address
+                        // For dynamic memory allocation, scan all memory slots
+                        let mut found_address = false;
+                        
+                        debug!(
+                            "Scanning {} memory slots for address patterns",
+                            function.memory.len()
+                        );
+                        
+                        // Check all memory slots for PUSH20 operations
+                        for (offset, memory_frame) in &function.memory {
+                            debug!(
+                                "Memory at offset {}: opcode={:02x}, value={}",
+                                offset,
+                                memory_frame.operation.opcode,
+                                memory_frame.value
+                            );
+                            
+                            if memory_frame.operation.opcode == 0x73 {
+                                // PUSH20 is definitely an address
+                                debug!("Found PUSH20 at offset {} - setting return type to address", offset);
+                                function.returns = Some(String::from("address"));
+                                found_address = true;
+                                break;
+                            } else if (0x60..=0x7f).contains(&memory_frame.operation.opcode) {
+                                // Check if the value looks like an address
+                                let value_bytes = memory_frame.value.to_be_bytes_vec();
+                                let non_zero_bytes = value_bytes.iter().filter(|&&b| b != 0).count();
+                                
+                                if non_zero_bytes <= 20 && non_zero_bytes > 0 {
+                                    // Check if the value is in the valid address range
+                                    // Most addresses start with many zeros when viewed as 32-byte values
+                                    let leading_zeros = value_bytes.iter().take_while(|&&b| b == 0).count();
+                                    if leading_zeros >= 12 { // 32 - 20 = 12 leading zeros for addresses
+                                        debug!(
+                                            "Found address-like value at offset {} (leading_zeros={}, non_zero_bytes={}) - setting return type to address",
+                                            offset, leading_zeros, non_zero_bytes
+                                        );
+                                        function.returns = Some(String::from("address"));
+                                        found_address = true;
+                                        break;
+                                    }
+                                }
+                            }
                         }
-                        None => match AND_BITMASK_REGEX_2
+                        
+                        if !found_address {
+                            // No address pattern found, default to uint256
+                            debug!("No address patterns found in memory - defaulting to uint256");
+                            function.returns = Some(String::from("uint256"));
+                        }
+                    } else {
+                        // Check if any memory operation contains a PUSH20 (recursively)
+                        let has_push20 = return_memory_operations.iter().any(|frame| {
+                            debug!("Checking memory operation for PUSH20: opcode={:02x}", frame.operation.opcode);
+                            contains_push20(&frame.operation, 0)
+                        });
+                        
+                        // Also check if the value looks like an address (20 bytes in lower part of 32-byte value)
+                        let has_address_value = return_memory_operations.iter().any(|frame| {
+                            let bytes = frame.value.to_be_bytes_vec();
+                            let leading_zeros = bytes.iter().take_while(|&&b| b == 0).count();
+                            let non_zero_bytes = bytes.iter().filter(|&&b| b != 0).count();
+                            
+                            debug!(
+                                "Checking value pattern: leading_zeros={}, non_zero_bytes={}, value={}",
+                                leading_zeros, non_zero_bytes, frame.value
+                            );
+                            
+                            // Common pattern for addresses: 12 leading zeros (32 - 20 = 12) and up to 20 non-zero bytes
+                            leading_zeros >= 12 && non_zero_bytes <= 20 && non_zero_bytes > 0
+                        });
+                        
+                        if has_push20 || has_address_value {
+                            debug!("Found address pattern in return memory operations - setting return type to address");
+                            function.returns = Some(String::from("address"));
+                        } else {
+                            // attempt to find a return type within the return memory operations
+                            let mut byte_size = 32; // default to 32 bytes
+                            let mut found_mask = false;
+                            
+                            // Try to find bitmask in the operations
+                            if let Some(bitmask) = AND_BITMASK_REGEX
                             .find(&return_memory_operations_solidified)
                             .ok()
                             .flatten()
                         {
-                            Some(bitmask) => {
-                                let cast = bitmask.as_str();
+                            let cast = bitmask.as_str();
+                            byte_size = cast.matches("ff").count();
+                            found_mask = true;
+                        } else if let Some(bitmask) = AND_BITMASK_REGEX_2
+                            .find(&return_memory_operations_solidified)
+                            .ok()
+                            .flatten()
+                        {
+                            let cast = bitmask.as_str();
+                            byte_size = cast.matches("ff").count();
+                            found_mask = true;
+                        }
 
-                                cast.matches("ff").count()
+                        // convert the cast size to a string
+                        let (_, cast_types) = byte_size_to_type(byte_size);
+                        
+                        // Special handling for address detection:
+                        let return_type = if byte_size == 20 {
+                            // For 20 bytes, this is definitely an address
+                            String::from("address")
+                        } else if byte_size == 32 {
+                            // For 32-byte returns, we need better heuristics
+                            
+                            // Check for explicit address mask
+                            if return_memory_operations_solidified.contains("0xffffffffffffffffffffffffffffffffffffffff") {
+                                String::from("address")
                             }
-                            None => 32,
-                        },
-                    };
-
-                    // convert the cast size to a string
-                    let (_, cast_types) = byte_size_to_type(byte_size);
-                    function.returns = Some(cast_types[0].to_string());
+                            // Check if this is a simple storage getter (common pattern for address getters)
+                            else if !found_mask && 
+                                    function.arguments.is_empty() && 
+                                    return_memory_operations.len() == 1 &&
+                                    return_memory_operations_solidified.contains("storage[") {
+                                // This is likely a getter for a storage variable
+                                // Many address storage variables are returned without explicit masking
+                                // since addresses are stored in the lower 20 bytes of a 32-byte slot
+                                String::from("address")
+                            }
+                            // If we found a mask pattern that suggests address masking
+                            else if found_mask && byte_size == 32 &&
+                                    return_memory_operations_solidified.contains("& (0x") && 
+                                    return_memory_operations_solidified.contains("ff") &&
+                                    return_memory_operations_solidified.matches("ff").count() == 20 {
+                                String::from("address")
+                            }
+                            else {
+                                // Default to uint256 for 32-byte values
+                                cast_types[0].to_string()
+                            }
+                        } else {
+                            // For other sizes, use the default type
+                            cast_types[0].to_string()
+                        };
+                        
+                        function.returns = Some(return_type);
+                        }
+                    }
                 }
 
                 // check if this is a state getter
