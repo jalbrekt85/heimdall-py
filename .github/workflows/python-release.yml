@@ -44,11 +44,10 @@ jobs:
           sccache: 'true'
           manylinux: auto
           working-directory: crates/python
-          docker-options: -e CARGO_NET_GIT_FETCH_WITH_CLI=true
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels
+          name: wheels-linux-${{ strategy.job-index }}
           path: crates/python/dist
 
   windows:
@@ -76,7 +75,7 @@ jobs:
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels
+          name: wheels-windows-${{ strategy.job-index }}
           path: crates/python/dist
 
   macos:
@@ -103,7 +102,7 @@ jobs:
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels
+          name: wheels-macos-${{ strategy.job-index }}
           path: crates/python/dist
 
   sdist:
@@ -121,7 +120,7 @@ jobs:
       - name: Upload sdist
         uses: actions/upload-artifact@v4
         with:
-          name: wheels
+          name: wheels-sdist
           path: crates/python/dist
 
   release:
@@ -141,7 +140,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: wheels
+          pattern: wheels-*
+          merge-multiple: true
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
