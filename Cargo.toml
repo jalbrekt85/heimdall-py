@@ -138,10 +138,20 @@ tokio = { version = "1", features = ["full"] }
 serde_json = "1.0"
 colored = "2"
 alloy-dyn-abi = "1.0"
-alloy = { version = "1.0", features = [
-    "full",
+alloy = { version = "1.0", default-features = false, features = [
+    "std",
+    "reqwest",
+    "reqwest-rustls-tls", 
     "rpc-types-debug",
     "rpc-types-trace",
+    "providers",
+    "transports",
+    "signers",
+    "contract",
+    "consensus",
+    "network",
+    "rpc-client",
+    "json-rpc",
 ] }
 serde = { version = "1.0", features = ["derive"] }
 async-trait = "0.1.51"
