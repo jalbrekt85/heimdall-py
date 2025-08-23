@@ -1,7 +1,11 @@
 use alloy_json_abi::{Function, EventParam, Param, StateMutability};
 use heimdall_decompiler::{decompile, DecompilerArgsBuilder};
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyTimeoutError};
 use pyo3::prelude::*;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
 
 #[pyclass]
 #[derive(Clone)]
@@ -115,8 +119,12 @@ fn convert_function(func: &Function) -> ABIFunction {
 }
 
 #[pyfunction]
-#[pyo3(signature = (code, skip_resolving=false, rpc_url=None, timeout=None))]
-fn decompile_code(code: String, skip_resolving: bool, rpc_url: Option<String>, timeout: Option<u64>) -> PyResult<ABI> {
+#[pyo3(signature = (code, skip_resolving=false, rpc_url=None, timeout_secs=None))]
+fn decompile_code(py: Python<'_>, code: String, skip_resolving: bool, rpc_url: Option<String>, timeout_secs: Option<u64>) -> PyResult<ABI> {
+    // Calculate timeout duration
+    let timeout_ms = timeout_secs.unwrap_or(25).saturating_mul(1000);
+    let timeout_duration = Duration::from_millis(timeout_ms);
+    
     // Build decompiler args
     let args = DecompilerArgsBuilder::new()
         .target(code)
@@ -126,19 +134,55 @@ fn decompile_code(code: String, skip_resolving: bool, rpc_url: Option<String>, t
         .include_solidity(false)
         .include_yul(false)
         .output(String::new())
-        .timeout(timeout.unwrap_or(25).saturating_mul(1000))
+        .timeout(timeout_ms)
         .build()
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to build args: {}", e)))?;
     
-    // Create a new tokio runtime and block on the async function
-    let runtime = tokio::runtime::Runtime::new()
-        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create runtime: {}", e)))?;
+    // Use a channel to communicate between threads
+    let (tx, rx) = std::sync::mpsc::channel();
+    let done = Arc::new(AtomicBool::new(false));
+    let done_clone = done.clone();
     
-    let result = runtime.block_on(async move {
-        decompile(args)
-            .await
-            .map_err(|e| PyRuntimeError::new_err(format!("Decompilation failed: {}", e)))
-    })?;
+    // Spawn the decompilation in a separate thread
+    let handle = thread::spawn(move || {
+        // Create a new tokio runtime
+        let runtime = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => {
+                let _ = tx.send(Err(format!("Failed to create runtime: {}", e)));
+                return;
+            }
+        };
+        
+        // Run the async decompilation
+        let result = runtime.block_on(async move {
+            decompile(args).await
+        });
+        
+        done_clone.store(true, Ordering::SeqCst);
+        let _ = tx.send(result.map_err(|e| format!("Decompilation failed: {}", e)));
+    });
+    
+    // Wait for the result with timeout
+    let result = match rx.recv_timeout(timeout_duration) {
+        Ok(Ok(result)) => {
+            done.store(true, Ordering::SeqCst);
+            let _ = handle.join();
+            Ok(result)
+        },
+        Ok(Err(e)) => {
+            done.store(true, Ordering::SeqCst);
+            let _ = handle.join();
+            Err(PyRuntimeError::new_err(e))
+        },
+        Err(_) => {
+            // Timeout occurred - we can't safely kill the thread, but we return immediately
+            Err(PyTimeoutError::new_err(format!(
+                "Decompilation timed out after {} seconds", 
+                timeout_ms / 1000
+            )))
+        }
+    }?;
     
     // Convert the JsonAbi to our Python ABI structure
     let json_abi = result.abi;
