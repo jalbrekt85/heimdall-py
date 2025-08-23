@@ -115,8 +115,8 @@ fn convert_function(func: &Function) -> ABIFunction {
 }
 
 #[pyfunction]
-#[pyo3(signature = (code, skip_resolving=false, rpc_url=None))]
-fn decompile_code(code: String, skip_resolving: bool, rpc_url: Option<String>) -> PyResult<ABI> {
+#[pyo3(signature = (code, skip_resolving=false, rpc_url=None, timeout=None))]
+fn decompile_code(code: String, skip_resolving: bool, rpc_url: Option<String>, timeout: Option<u64>) -> PyResult<ABI> {
     // Build decompiler args
     let args = DecompilerArgsBuilder::new()
         .target(code)
@@ -126,7 +126,7 @@ fn decompile_code(code: String, skip_resolving: bool, rpc_url: Option<String>) -
         .include_solidity(false)
         .include_yul(false)
         .output(String::new())
-        .timeout(25000)
+        .timeout(timeout.unwrap_or(25).saturating_mul(1000))
         .build()
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to build args: {}", e)))?;
     
