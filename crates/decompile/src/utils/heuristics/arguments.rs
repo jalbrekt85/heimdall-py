@@ -183,66 +183,7 @@ pub(crate) fn argument_heuristic<'a>(
                         function.returns = Some(String::from("bytes memory"));
                     }
                 } else {
-                    // If we have no memory operations and this is a parameterless function,
-                    // it's likely returning a constant
-                    if return_memory_operations.is_empty() && function.arguments.is_empty() && size == 32 {
-                        debug!(
-                            "Checking for constant return: no memory ops, no args, size=32"
-                        );
-                        
-                        // Check if we have any memory operations that might contain an address
-                        // For dynamic memory allocation, scan all memory slots
-                        let mut found_address = false;
-                        
-                        debug!(
-                            "Scanning {} memory slots for address patterns",
-                            function.memory.len()
-                        );
-                        
-                        // Check all memory slots for PUSH20 operations
-                        for (offset, memory_frame) in &function.memory {
-                            debug!(
-                                "Memory at offset {}: opcode={:02x}, value={}",
-                                offset,
-                                memory_frame.operation.opcode,
-                                memory_frame.value
-                            );
-                            
-                            if memory_frame.operation.opcode == 0x73 {
-                                // PUSH20 is definitely an address
-                                debug!("Found PUSH20 at offset {} - setting return type to address", offset);
-                                function.returns = Some(String::from("address"));
-                                found_address = true;
-                                break;
-                            } else if (0x60..=0x7f).contains(&memory_frame.operation.opcode) {
-                                // Check if the value looks like an address
-                                let value_bytes = memory_frame.value.to_be_bytes_vec();
-                                let non_zero_bytes = value_bytes.iter().filter(|&&b| b != 0).count();
-                                
-                                if non_zero_bytes <= 20 && non_zero_bytes > 0 {
-                                    // Check if the value is in the valid address range
-                                    // Most addresses start with many zeros when viewed as 32-byte values
-                                    let leading_zeros = value_bytes.iter().take_while(|&&b| b == 0).count();
-                                    if leading_zeros >= 12 { // 32 - 20 = 12 leading zeros for addresses
-                                        debug!(
-                                            "Found address-like value at offset {} (leading_zeros={}, non_zero_bytes={}) - setting return type to address",
-                                            offset, leading_zeros, non_zero_bytes
-                                        );
-                                        function.returns = Some(String::from("address"));
-                                        found_address = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        
-                        if !found_address {
-                            // No address pattern found, default to uint256
-                            debug!("No address patterns found in memory - defaulting to uint256");
-                            function.returns = Some(String::from("uint256"));
-                        }
-                    } else {
-                        // Check if any memory operation contains a PUSH20 (recursively)
+                    // Check if any memory operation contains a PUSH20 (recursively)
                         let has_push20 = return_memory_operations.iter().any(|frame| {
                             debug!("Checking memory operation for PUSH20: opcode={:02x}", frame.operation.opcode);
                             contains_push20(&frame.operation, 0)
@@ -304,16 +245,6 @@ pub(crate) fn argument_heuristic<'a>(
                             if return_memory_operations_solidified.contains("0xffffffffffffffffffffffffffffffffffffffff") {
                                 String::from("address")
                             }
-                            // Check if this is a simple storage getter (common pattern for address getters)
-                            else if !found_mask && 
-                                    function.arguments.is_empty() && 
-                                    return_memory_operations.len() == 1 &&
-                                    return_memory_operations_solidified.contains("storage[") {
-                                // This is likely a getter for a storage variable
-                                // Many address storage variables are returned without explicit masking
-                                // since addresses are stored in the lower 20 bytes of a 32-byte slot
-                                String::from("address")
-                            }
                             // If we found a mask pattern that suggests address masking
                             else if found_mask && byte_size == 32 &&
                                     return_memory_operations_solidified.contains("& (0x") && 
@@ -331,7 +262,6 @@ pub(crate) fn argument_heuristic<'a>(
                         };
                         
                         function.returns = Some(return_type);
-                        }
                     }
                 }
 
