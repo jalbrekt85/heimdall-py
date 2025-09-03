@@ -152,7 +152,10 @@ pub(crate) fn argument_heuristic<'a>(
                 }
 
                 // if the any input op is ISZERO(x), this is a boolean return
-                if return_memory_operations.iter().any(|x| x.operation.opcode == ISZERO) {
+                let has_iszero = return_memory_operations.iter().any(|x| x.operation.opcode == ISZERO);
+                
+                
+                if has_iszero && !function.arguments.is_empty() {
                     function.returns = Some(String::from("bool"));
                 }
                 // if the input op is any of the following, it is an address return
@@ -190,19 +193,25 @@ pub(crate) fn argument_heuristic<'a>(
                         });
                         
                         // Also check if the value looks like an address (20 bytes in lower part of 32-byte value)
-                        let has_address_value = return_memory_operations.iter().any(|frame| {
-                            let bytes = frame.value.to_be_bytes_vec();
-                            let leading_zeros = bytes.iter().take_while(|&&b| b == 0).count();
-                            let non_zero_bytes = bytes.iter().filter(|&&b| b != 0).count();
-                            
-                            debug!(
-                                "Checking value pattern: leading_zeros={}, non_zero_bytes={}, value={}",
-                                leading_zeros, non_zero_bytes, frame.value
-                            );
-                            
-                            // Common pattern for addresses: 12 leading zeros (32 - 20 = 12) and up to 20 non-zero bytes
-                            leading_zeros >= 12 && non_zero_bytes <= 20 && non_zero_bytes > 0
-                        });
+                        let has_address_value = if function.arguments.is_empty() {
+                            // For parameterless functions, require actual address pattern
+                            return_memory_operations.iter().any(|frame| {
+                                let bytes = frame.value.to_be_bytes_vec();
+                                let leading_zeros = bytes.iter().take_while(|&&b| b == 0).count();
+                                let non_zero_bytes = bytes.iter().filter(|&&b| b != 0).count();
+                                
+                                // Real addresses typically have exactly 12 leading zeros and many non-zero bytes
+                                leading_zeros == 12 && non_zero_bytes >= 10 && non_zero_bytes <= 20
+                            })
+                        } else {
+                            return_memory_operations.iter().any(|frame| {
+                                let bytes = frame.value.to_be_bytes_vec();
+                                let leading_zeros = bytes.iter().take_while(|&&b| b == 0).count();
+                                let non_zero_bytes = bytes.iter().filter(|&&b| b != 0).count();
+                                leading_zeros >= 12 && non_zero_bytes <= 20 && non_zero_bytes > 0
+                            })
+                        };
+                        
                         
                         if has_push20 || has_address_value {
                             debug!("Found address pattern in return memory operations - setting return type to address");
@@ -211,6 +220,7 @@ pub(crate) fn argument_heuristic<'a>(
                             // attempt to find a return type within the return memory operations
                             let mut byte_size = 32; // default to 32 bytes
                             let mut found_mask = false;
+                            
                             
                             // Try to find bitmask in the operations
                             if let Some(bitmask) = AND_BITMASK_REGEX
@@ -234,8 +244,12 @@ pub(crate) fn argument_heuristic<'a>(
                         // convert the cast size to a string
                         let (_, cast_types) = byte_size_to_type(byte_size);
                         
-                        // Special handling for address detection:
-                        let return_type = if byte_size == 20 {
+                        
+                        // Special handling for return types
+                        let return_type = if function.arguments.is_empty() && byte_size == 1 {
+                            // Parameterless function with 1-byte return - prefer uint8 over bool
+                            String::from("uint8")
+                        } else if byte_size == 20 {
                             // For 20 bytes, this is definitely an address
                             String::from("address")
                         } else if byte_size == 32 {
