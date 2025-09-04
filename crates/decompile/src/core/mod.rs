@@ -322,6 +322,24 @@ pub async fn decompile(args: DecompilerArgs) -> Result<DecompileResult, Error> {
         );
     });
 
+    // Post-process functions that only use REVERT (no RETURN)
+    analyzed_functions.iter_mut().for_each(|f| {
+        // Check if function has no returns detected and has arguments
+        if f.returns.is_none() && !f.arguments.is_empty() {
+            let has_return_path = f.logic.iter().any(|line| line.contains("__HAS_RETURN__"));
+            
+            let uses_iszero = f.logic.iter().any(|line| line.contains("__USES_ISZERO__"));
+            
+            if !has_return_path && uses_iszero && (f.view || f.pure) {
+                f.returns = Some(String::from("bool"));
+                debug!(
+                    "function '{}' appears to be a REVERT-only boolean check, setting return type to bool",
+                    f.selector
+                );
+            }
+        }
+    });
+
     // get a new PostprocessorOrchestrator
     // note: this will do nothing if the include_solidity and include_yul flags are false
     let mut postprocessor = PostprocessOrchestrator::new(analyzer_type)?;
