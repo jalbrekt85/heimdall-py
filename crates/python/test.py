@@ -1,4 +1,6 @@
-from heimdall_py import decompile_code
+from heimdall_py import decompile_code, StorageSlot
+import pickle
+import copy
 
 with open("contracts/vault.bin", "r") as f:
     vault = f.readline().strip()
@@ -509,6 +511,78 @@ def test_erc20_comprehensive():
         print("\n✓ ERC20 (Dai) comprehensive test passed")
     return len(errors) == 0
 
+def test_pickle_and_lookups():
+    print("\n=== Pickle and Lookup Test ===")
+    errors = []
+    
+    # Test with WETH contract
+    abi = decompile_code(weth, skip_resolving=False)
+    
+    # Test pickling
+    pickled = pickle.dumps(abi)
+    restored = pickle.loads(pickled)
+    check(len(restored.functions) == len(abi.functions), f"Pickle preserves functions", errors)
+    check(len(restored.events) == len(abi.events), f"Pickle preserves events", errors)
+    
+    # Test function lookups
+    if abi.functions:
+        func = abi.functions[0]
+        
+        # Lookup by name if resolved
+        if not func.name.startswith("Unresolved_"):
+            found = abi.get_function(func.name)
+            check(found and found.name == func.name, f"Lookup by name works", errors)
+        
+        # Lookup by selector
+        selector = func.selector
+        if isinstance(selector, list):
+            selector = bytes(selector)
+        found = abi.get_function(selector)
+        check(found and found.name == func.name, f"Lookup by selector works", errors)
+        
+        # Lookup by hex selector
+        hex_selector = "0x" + selector.hex()
+        found = abi.get_function(hex_selector)
+        check(found and found.name == func.name, f"Lookup by hex selector works", errors)
+    
+    # Test storage layout
+    slot = StorageSlot()
+    slot.index = 0
+    slot.offset = 0
+    slot.typ = "uint256"
+    abi.storage_layout = [slot]
+    check(len(abi.storage_layout) == 1, f"Storage layout can be set", errors)
+    
+    # Verify storage persists through pickling
+    pickled = pickle.dumps(abi)
+    restored = pickle.loads(pickled)
+    check(len(restored.storage_layout) == 1, f"Storage layout persists through pickle", errors)
+    
+    # Test deep copy
+    copied = copy.deepcopy(abi)
+    check(len(copied.functions) == len(abi.functions), f"Deep copy works", errors)
+    check(id(copied) != id(abi), f"Deep copy creates new object", errors)
+    
+    # Test selector extraction from Unresolved functions
+    vault_abi = decompile_code(vault, skip_resolving=True)
+    unresolved_found = False
+    for func in vault_abi.functions:
+        if func.name.startswith("Unresolved_"):
+            selector = func.selector
+            if isinstance(selector, list):
+                selector = bytes(selector)
+            unresolved_found = True
+            break
+    
+    if unresolved_found:
+        check(selector is not None, f"Selector extracted from Unresolved_ function", errors)
+    
+    if errors:
+        print(f"\n❌ Pickle and lookup test had {len(errors)} failures")
+    else:
+        print("\n✓ Pickle and lookup test passed")
+    return len(errors) == 0
+
 if __name__ == "__main__":
     print("Running comprehensive contract tests...")
     all_passed = True
@@ -517,6 +591,7 @@ if __name__ == "__main__":
     all_passed &= test_weth_comprehensive()
     all_passed &= test_univ2pair_comprehensive()
     all_passed &= test_erc20_comprehensive()
+    all_passed &= test_pickle_and_lookups()
     
     if all_passed:
         print("\n✅ All comprehensive tests passed!")
