@@ -2,13 +2,13 @@ from heimdall_py import decompile_code, configure_cache, clear_cache, get_cache_
 import pickle
 import copy
 import time
+import tempfile
+import os
 
 import heimdall_py
-print(f"Using heimdall-py from: {heimdall_py.__file__}")
-try:
-    print("Module loaded successfully")
-except Exception as e:
-    print(f"Module check: {e}")
+
+TEST_CACHE_DIR = tempfile.mkdtemp(prefix="heimdall_test_cache_")
+configure_cache(enabled=True, directory=TEST_CACHE_DIR)
 
 with open("contracts/vault.bin", "r") as f:
     vault = f.readline().strip()
@@ -884,13 +884,87 @@ def test_storage_layout_extraction():
         print("\n✓ Storage layout extraction test passed")
     return len(errors) == 0
 
+def test_error_handling():
+    """Test the new error handling where decompile_code always returns ABI"""
+    print("\n=== Error Handling Test ===")
+    errors = []
+
+    # Test 1: Timeout handling - returns ABI with decompile_error
+    print("\n1. Testing timeout handling:")
+    abi = decompile_code(univ2pair, timeout_secs=0)  # 0 second timeout
+    check(abi is not None, "Returns ABI object even on timeout", errors)
+    check(abi.decompile_error is not None, "decompile_error field is populated", errors)
+    check("timed out" in abi.decompile_error.lower() if abi.decompile_error else False,
+          f"Error mentions timeout: {abi.decompile_error}", errors)
+    check(len(abi.functions) == 0, "Functions list is empty on failure", errors)
+
+    # Test 2: Invalid bytecode - returns empty ABI
+    print("\n2. Testing invalid bytecode:")
+    abi = decompile_code("not_hex_at_all", timeout_secs=1)
+    check(abi is not None, "Returns ABI object for invalid input", errors)
+    check(abi.decompile_error is not None, "decompile_error populated for invalid hex", errors)
+    check(len(abi.functions) == 0, "No functions extracted from invalid bytecode", errors)
+
+    # Test 3: Successful decompilation - no errors
+    print("\n3. Testing successful decompilation:")
+    abi = decompile_code(weth, timeout_secs=10)
+    check(abi.decompile_error is None, "No decompile_error on success", errors)
+    check(len(abi.functions) > 0, f"Functions extracted: {len(abi.functions)}", errors)
+
+    # Test 4: Caching of failed decompilations
+    print("\n4. Testing failed decompilations are cached:")
+    clear_cache()
+
+    # First call - should fail and cache
+    start = time.time()
+    abi1 = decompile_code("invalid", timeout_secs=1)
+    time1 = time.time() - start
+
+    # Second call - should hit cache
+    start = time.time()
+    abi2 = decompile_code("invalid", timeout_secs=1)
+    time2 = time.time() - start
+
+    check(time2 < time1 / 2 or time2 < 0.01,
+          f"Cache hit is faster ({time2:.3f}s vs {time1:.3f}s)", errors)
+    check(abi1.decompile_error == abi2.decompile_error,
+          "Same error returned from cache", errors)
+
+    # Test 5: 100% cache hit guarantee
+    print("\n5. Testing 100% cache hit guarantee:")
+    clear_cache()
+
+    test_inputs = ["0x6080604052", "invalid_hex", "", weth[:100]]
+
+    # First pass - populate cache
+    for bytecode in test_inputs:
+        decompile_code(bytecode, timeout_secs=1)
+
+    stats_after_first = get_cache_stats()
+    first_misses = stats_after_first['misses']
+
+    # Second pass - should be 100% hits
+    for bytecode in test_inputs:
+        decompile_code(bytecode, timeout_secs=1)
+
+    stats_after_second = get_cache_stats()
+    second_misses = stats_after_second['misses']
+
+    check(second_misses == first_misses,
+          f"No new cache misses on second pass (stayed at {first_misses})", errors)
+
+    if errors:
+        print(f"\n❌ Error handling test had {len(errors)} failures")
+    else:
+        print("\n✓ Error handling test passed")
+    return len(errors) == 0
+
 def test_cache_comprehensive():
     print("\n=== Comprehensive Cache Test ===")
     errors = []
 
     # Test 1: Cache disabled vs enabled performance
     print("\n1. Testing performance without cache vs with cache:")
-    configure_cache(enabled=False)
 
     # Run 100 decompilations without cache
     print("   Running 100 decompilations WITHOUT cache...")
@@ -900,8 +974,7 @@ def test_cache_comprehensive():
     time_without_cache = time.time() - start
     print(f"   Time without cache: {time_without_cache:.2f}s")
 
-    # Enable cache and test
-    configure_cache(enabled=True)
+    # Test with cache (already configured to use test directory)
     clear_cache()
 
     print("   Running 100 decompilations WITH cache...")
@@ -997,17 +1070,23 @@ if __name__ == "__main__":
     print("Running comprehensive contract tests...")
     all_passed = True
 
-    all_passed &= test_vault()
-    all_passed &= test_weth_comprehensive()
-    all_passed &= test_univ2pair_comprehensive()
-    all_passed &= test_erc20_comprehensive()
-    all_passed &= test_pickle_and_lookups()
-    all_passed &= test_from_json()
-    all_passed &= test_templedao_selector_mismatch()
-    all_passed &= test_storage_layout_extraction()
-    all_passed &= test_cache_comprehensive()
+    try:
+        all_passed &= test_error_handling()
+        all_passed &= test_vault()
+        all_passed &= test_weth_comprehensive()
+        all_passed &= test_univ2pair_comprehensive()
+        all_passed &= test_erc20_comprehensive()
+        all_passed &= test_pickle_and_lookups()
+        all_passed &= test_from_json()
+        all_passed &= test_templedao_selector_mismatch()
+        all_passed &= test_storage_layout_extraction()
+        all_passed &= test_cache_comprehensive()
 
-    if all_passed:
-        print("\n✅ All comprehensive tests passed!")
-    else:
-        print("\n⚠️  Some tests had failures - review output above")
+        if all_passed:
+            print("\n✅ All comprehensive tests passed!")
+        else:
+            print("\n⚠️  Some tests had failures - review output above")
+    finally:
+        import shutil
+        if os.path.exists(TEST_CACHE_DIR):
+            shutil.rmtree(TEST_CACHE_DIR)

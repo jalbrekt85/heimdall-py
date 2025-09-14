@@ -7,6 +7,14 @@ the contract's ABI (Application Binary Interface).
 
 from typing import List, Optional, Union
 
+class DecompileError(Exception):
+    """Base exception for expected decompilation failures."""
+    pass
+
+class DecompileTimeoutError(DecompileError):
+    """Raised when decompilation times out."""
+    pass
+
 class ABIParam:
     """Represents a parameter in a function, event, or error."""
     name: str
@@ -85,6 +93,8 @@ class ABI:
     fallback: Optional[ABIFunction]
     receive: Optional[ABIFunction]
     storage_layout: List[StorageSlot]
+    decompile_error: Optional[str]  # Error message if decompilation failed
+    storage_error: Optional[str]  # Error message if storage extraction failed
 
     def __init__(self) -> None:
         """Create a new empty ABI."""
@@ -160,20 +170,26 @@ def decompile_code(
         timeout_secs: Optional timeout in seconds (default: 25 seconds)
 
     Returns:
-        ABI object containing all functions, events, errors, special functions, and optionally storage layout
+        ABI object containing all functions, events, errors, special functions, and optionally storage layout.
+        Always returns an ABI object, even if decompilation fails.
 
     Raises:
-        RuntimeError: If decompilation fails
-        TimeoutError: If decompilation exceeds the timeout
+        IOError: If cache operations fail
+        RuntimeError: If critical runtime errors occur
 
     Example:
-        >>> # Decompile bytecode directly
+        >>> # Decompile EVM bytecode
         >>> bytecode = "0x60806040..."
         >>> abi = decompile_code(bytecode)
-        >>> for func in abi.functions:
-        ...     print(f"{func.name}({', '.join(p.type_ for p in func.inputs)})")
         >>>
-        >>> # Extract storage layout along with ABI
+        >>> # Check results
+        >>> if abi.decompile_error:
+        ...     print(f"Failed: {abi.decompile_error}")
+        >>> else:
+        ...     for func in abi.functions:
+        ...         print(f"{func.name}({', '.join(p.type_ for p in func.inputs)})")
+        >>>
+        >>> # Extract storage layout
         >>> abi = decompile_code(bytecode, extract_storage=True)
         >>> for slot in abi.storage_layout:
         ...     print(f"Slot {slot.index}: {slot.typ}")
@@ -181,13 +197,12 @@ def decompile_code(
         >>> # Skip signature resolution for faster decompilation
         >>> abi = decompile_code(bytecode, skip_resolving=True)
         >>>
-        >>> # Decompile from contract address (requires RPC URL)
-        >>> abi = decompile_code("0x123...", rpc_url="https://localhost:8545")
+        >>> # Decompile from contract address
+        >>> abi = decompile_code("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", rpc_url="https://eth.llamarpc.com")
         >>>
-        >>> # Lookup function by selector
-        >>> func = abi.get_function("0x70a08231")  # balanceOf selector
-        >>> if func:
-        ...     print(f"Found: {func.name}")
+        >>> # Lookup function by selector or name
+        >>> func = abi.get_function("0x70a08231")  # by selector
+        >>> func = abi.get_function("balanceOf")    # by name
     """
     ...
 

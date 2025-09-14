@@ -1,9 +1,10 @@
 use alloy_json_abi::{Function, EventParam, Param, StateMutability};
 use heimdall_decompiler::{decompile, DecompilerArgsBuilder};
 use indexmap::IndexMap;
-use pyo3::exceptions::{PyRuntimeError, PyTimeoutError, PyIOError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyIOError, PyValueError, PyException};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
+use pyo3::create_exception;
 use serde::{Serialize, Deserialize};
 use serde_json::Value;
 use std::fs;
@@ -16,6 +17,9 @@ use tiny_keccak::{Hasher, Keccak};
 use storage_layout_extractor::{self as sle, extractor::{chain::{version::EthereumVersion, Chain}, contract::Contract}};
 
 mod cache;
+
+create_exception!(heimdall_py, DecompileError, PyException, "Base exception for expected decompilation failures");
+create_exception!(heimdall_py, DecompileTimeoutError, DecompileError, "Decompilation timed out");
 
 #[pyclass(module = "heimdall_py")]
 #[derive(Clone, Serialize, Deserialize)]
@@ -137,7 +141,13 @@ struct ABI {
     
     #[pyo3(get, set)]
     storage_layout: Vec<StorageSlot>,
-    
+
+    #[pyo3(get)]
+    decompile_error: Option<String>,
+
+    #[pyo3(get)]
+    storage_error: Option<String>,
+
     by_selector: IndexMap<[u8; 4], usize>,
     by_name: IndexMap<String, usize>,
 }
@@ -471,6 +481,8 @@ impl ABI {
             fallback: None,
             receive: None,
             storage_layout: Vec::new(),
+            decompile_error: None,
+            storage_error: None,
             by_selector: IndexMap::new(),
             by_name: IndexMap::new(),
         }
@@ -478,15 +490,12 @@ impl ABI {
 
     #[staticmethod]
     fn from_json(file_path: String) -> PyResult<Self> {
-        // Read the JSON file
         let contents = fs::read_to_string(&file_path)
             .map_err(|e| PyIOError::new_err(format!("Failed to read file {}: {}", file_path, e)))?;
 
-        // Parse the JSON
         let json_value: Value = serde_json::from_str(&contents)
             .map_err(|e| PyValueError::new_err(format!("Invalid JSON: {}", e)))?;
 
-        // Parse the ABI array
         let abi_array = if let Some(obj) = json_value.as_object() {
             // Handle { "abi": [...] } format
             obj.get("abi")
@@ -501,7 +510,6 @@ impl ABI {
 
         let mut abi = ABI::new();
 
-        // Process each entry in the ABI
         for entry in abi_array {
             let entry_type = entry.get("type")
                 .and_then(|v| v.as_str())
@@ -537,9 +545,7 @@ impl ABI {
                 "receive" => {
                     abi.receive = parse_receive_entry(entry)?;
                 },
-                _ => {
-                    // Skip unknown types
-                }
+                _ => {}
             }
         }
 
@@ -547,7 +553,6 @@ impl ABI {
     }
 
     fn get_function(&self, _py: Python, key: &PyAny) -> PyResult<Option<ABIFunction>> {
-        // Try as string first
         if let Ok(name) = key.extract::<String>() {
             if name.starts_with("0x") {
                 // Hex selector like "0x12345678"
@@ -560,14 +565,12 @@ impl ABI {
                     }
                 }
             } else {
-                // Function name lookup
                 if let Some(&idx) = self.by_name.get(&name) {
                     return Ok(Some(self.functions[idx].clone()));
                 }
             }
         }
-        
-        // Try as bytes
+
         if let Ok(selector_vec) = key.extract::<Vec<u8>>() {
             if selector_vec.len() >= 4 {
                 let selector: [u8; 4] = selector_vec[..4].try_into().unwrap();
@@ -589,6 +592,8 @@ impl ABI {
             &self.fallback,
             &self.receive,
             &self.storage_layout,
+            &self.decompile_error,
+            &self.storage_error,
             &self.by_selector,
             &self.by_name,
         );
@@ -609,11 +614,13 @@ impl ABI {
             Option<ABIFunction>,
             Option<ABIFunction>,
             Vec<StorageSlot>,
+            Option<String>,
+            Option<String>,
             IndexMap<[u8; 4], usize>,
             IndexMap<String, usize>,
         );
         
-        let (functions, events, errors, constructor, fallback, receive, storage_layout, by_selector, by_name): StateType = 
+        let (functions, events, errors, constructor, fallback, receive, storage_layout, _decompile_error, _storage_error, by_selector, by_name): StateType = 
             bincode::deserialize(bytes)
                 .map_err(|e| PyRuntimeError::new_err(format!("Deserialization failed: {}", e)))?;
         
@@ -625,6 +632,8 @@ impl ABI {
             fallback,
             receive,
             storage_layout,
+            decompile_error: None,
+            storage_error: None,
             by_selector,
             by_name,
         };
@@ -714,105 +723,119 @@ fn decompile_code(py: Python<'_>, code: String, skip_resolving: bool, extract_st
         done_clone.store(true, Ordering::SeqCst);
         let _ = tx.send(result.map_err(|e| format!("Decompilation failed: {}", e)));
     });
-    
-    let result = match rx.recv_timeout(timeout_duration) {
+
+    let (decompile_result, decompile_error) = match rx.recv_timeout(timeout_duration) {
         Ok(Ok(result)) => {
             done.store(true, Ordering::SeqCst);
             let _ = handle.join();
-            Ok(result)
+            (Some(result), None)
         },
         Ok(Err(e)) => {
             done.store(true, Ordering::SeqCst);
             let _ = handle.join();
-            Err(PyRuntimeError::new_err(e))
+            (None, Some(e))
         },
         Err(_) => {
-            Err(PyTimeoutError::new_err(format!(
-                "Decompilation timed out after {} seconds", 
+            done.store(true, Ordering::SeqCst);
+            (None, Some(format!(
+                "Decompilation timed out after {} seconds",
                 timeout_ms / 1000
             )))
         }
-    }?;
-    
-    let json_abi = result.abi;
-    
-    let functions: Vec<ABIFunction> = json_abi
-        .functions()
-        .map(convert_function)
-        .collect();
-    
-    let events: Vec<ABIEvent> = json_abi
-        .events()
-        .map(|event| ABIEvent {
-            name: event.name.clone(),
-            inputs: event.inputs.iter().map(convert_event_param).collect(),
-            anonymous: event.anonymous,
-        })
-        .collect();
-    
-    let errors: Vec<ABIError> = json_abi
-        .errors()
-        .map(|error| ABIError {
-            name: error.name.clone(),
-            inputs: error.inputs.iter().map(convert_param).collect(),
-        })
-        .collect();
-    
-    let constructor = json_abi.constructor.as_ref().map(|c| {
-        let signature = format!("constructor({})", 
-            c.inputs.iter()
-                .map(|p| p.ty.as_str())
-                .collect::<Vec<_>>()
-                .join(","));
-        ABIFunction {
-            name: "constructor".to_string(),
-            inputs: c.inputs.iter().map(convert_param).collect(),
+    };
+
+    let (functions, events, errors, constructor, fallback, receive) = if let Some(result) = decompile_result {
+        let json_abi = result.abi;
+
+        let functions: Vec<ABIFunction> = json_abi
+            .functions()
+            .map(convert_function)
+            .collect();
+
+        let events: Vec<ABIEvent> = json_abi
+            .events()
+            .map(|event| ABIEvent {
+                name: event.name.clone(),
+                inputs: event.inputs.iter().map(convert_event_param).collect(),
+                anonymous: event.anonymous,
+            })
+            .collect();
+
+        let errors: Vec<ABIError> = json_abi
+            .errors()
+            .map(|error| ABIError {
+                name: error.name.clone(),
+                inputs: error.inputs.iter().map(convert_param).collect(),
+            })
+            .collect();
+
+        let constructor = json_abi.constructor.as_ref().map(|c| {
+            let signature = format!("constructor({})",
+                c.inputs.iter()
+                    .map(|p| p.ty.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","));
+            ABIFunction {
+                name: "constructor".to_string(),
+                inputs: c.inputs.iter().map(convert_param).collect(),
+                outputs: Vec::new(),
+                state_mutability: state_mutability_to_string(c.state_mutability),
+                constant: false,
+                payable: matches!(c.state_mutability, StateMutability::Payable),
+                selector: [0; 4],
+                signature,
+            }
+        });
+
+        let fallback = json_abi.fallback.as_ref().map(|f| ABIFunction {
+            name: "fallback".to_string(),
+            inputs: Vec::new(),
             outputs: Vec::new(),
-            state_mutability: state_mutability_to_string(c.state_mutability),
+            state_mutability: state_mutability_to_string(f.state_mutability),
             constant: false,
-            payable: matches!(c.state_mutability, StateMutability::Payable),
+            payable: matches!(f.state_mutability, StateMutability::Payable),
             selector: [0; 4],
-            signature,
-        }
-    });
-    
-    let fallback = json_abi.fallback.as_ref().map(|f| ABIFunction {
-        name: "fallback".to_string(),
-        inputs: Vec::new(),
-        outputs: Vec::new(),
-        state_mutability: state_mutability_to_string(f.state_mutability),
-        constant: false,
-        payable: matches!(f.state_mutability, StateMutability::Payable),
-        selector: [0; 4],
-        signature: "fallback()".to_string(),
-    });
-    
-    let receive = json_abi.receive.as_ref().map(|_| ABIFunction {
-        name: "receive".to_string(),
-        inputs: Vec::new(),
-        outputs: Vec::new(),
-        state_mutability: "payable".to_string(),
-        constant: false,
-        payable: true,
-        selector: [0; 4],
-        signature: "receive()".to_string(),
-    });
-    
+            signature: "fallback()".to_string(),
+        });
+
+        let receive = json_abi.receive.as_ref().map(|_| ABIFunction {
+            name: "receive".to_string(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            state_mutability: "payable".to_string(),
+            constant: false,
+            payable: true,
+            selector: [0; 4],
+            signature: "receive()".to_string(),
+        });
+
+        (functions, events, errors, constructor, fallback, receive)
+    } else {
+        (Vec::new(), Vec::new(), Vec::new(), None, None, None)
+    };
+
     let mut by_selector = IndexMap::new();
     let mut by_name = IndexMap::new();
-    
+
     for (idx, func) in functions.iter().enumerate() {
         by_selector.insert(func.selector, idx);
         if !func.name.is_empty() {
             by_name.insert(func.name.clone(), idx);
         }
     }
-    
+
+    let mut storage_error: Option<String> = None;
     let storage_layout = if extract_storage {
         let bytecode_str = code.strip_prefix("0x").unwrap_or(&code);
+        let bytes = match hex::decode(bytecode_str) {
+            Ok(b) => b,
+            Err(e) => {
+                storage_error = Some(format!("Failed to decode bytecode: {}", e));
+                Vec::new()
+            }
+        };
 
-        let bytes = hex::decode(bytecode_str)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to decode bytecode for storage extraction: {}", e)))?;
+        if !bytes.is_empty() {
 
         let contract = Contract::new(
             bytes,
@@ -823,7 +846,7 @@ fn decompile_code(py: Python<'_>, code: String, skip_resolving: bool, extract_st
 
         let extract_timeout = timeout_secs.unwrap_or(25);
 
-        py.allow_threads(move || {
+        let storage_result = py.allow_threads(move || {
             let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<StorageSlot>, String>>();
             let done = Arc::new(AtomicBool::new(false));
             let done_clone = done.clone();
@@ -853,14 +876,12 @@ fn decompile_code(py: Python<'_>, code: String, skip_resolving: bool, extract_st
                         let _ = tx.send(Ok(slots));
                     },
                     Err(e) => {
-                        if format!("{:?}", e).contains("StoppedByWatchdog") {
-                            eprintln!("Storage extraction stopped by timeout after {} seconds", extract_timeout);
-                            let _ = tx.send(Ok(Vec::new()));
+                        let error_msg = if format!("{:?}", e).contains("StoppedByWatchdog") {
+                            format!("Storage extraction timed out after {} seconds", extract_timeout)
                         } else {
-                            // Log error but don't fail - storage extraction is optional
-                            eprintln!("Storage extraction failed: {:?}", e);
-                            let _ = tx.send(Ok(Vec::new()));
-                        }
+                            format!("Storage extraction failed: {:?}", e)
+                        };
+                        let _ = tx.send(Err(error_msg));
                     }
                 }
             });
@@ -871,10 +892,10 @@ fn decompile_code(py: Python<'_>, code: String, skip_resolving: bool, extract_st
                     let _ = handle.join();
                     Ok(slots)
                 },
-                Ok(Err(_)) => {
+                Ok(Err(e)) => {
                     done.store(true, Ordering::SeqCst);
                     let _ = handle.join();
-                    Ok(Vec::new())
+                    Err(e)
                 },
                 Err(_) => {
                     done.store(true, Ordering::SeqCst);
@@ -884,14 +905,25 @@ fn decompile_code(py: Python<'_>, code: String, skip_resolving: bool, extract_st
                             Ok(slots)
                         },
                         _ => {
-                            eprintln!("Storage extraction timed out after {} seconds", extract_timeout);
                             let _ = handle.join();
-                            Ok(Vec::new())
+                            Err(format!("Storage extraction timed out after {} seconds", extract_timeout))
                         }
                     }
                 }
             }
-        }).unwrap_or_else(|_: PyErr| Vec::new())
+        });
+
+        match storage_result {
+            Ok(slots) => slots,
+            Err(e) => {
+                storage_error = Some(e);
+                Vec::new()
+            }
+        }
+        } else {
+            storage_error = Some("Empty bytecode after decoding".to_string());
+            Vec::new()
+        }
     } else {
         Vec::new()
     };
@@ -904,17 +936,18 @@ fn decompile_code(py: Python<'_>, code: String, skip_resolving: bool, extract_st
         fallback,
         receive,
         storage_layout,
+        decompile_error: decompile_error.clone(),
+        storage_error: storage_error.clone(),
         by_selector,
         by_name,
     };
 
     if use_cache && cache::AbiCache::is_enabled() {
         let serialized = bincode::serialize(&abi)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to serialize ABI for caching: {}", e)))?;
+            .map_err(|e| PyIOError::new_err(format!("Failed to serialize ABI for caching: {}", e)))?;
 
-        if let Err(e) = cache::AbiCache::put(&code, skip_resolving, &serialized) {
-            eprintln!("Warning: Failed to cache ABI: {}", e);
-        }
+        cache::AbiCache::put(&code, skip_resolving, &serialized)
+            .map_err(|e| PyIOError::new_err(format!("Failed to write to cache: {}", e)))?;
     }
 
     Ok(abi)
@@ -967,9 +1000,8 @@ fn get_cache_stats(py: Python<'_>) -> PyResult<PyObject> {
 
 #[pymodule]
 fn heimdall_py(py: Python, m: &PyModule) -> PyResult<()> {
-    if let Err(e) = cache::AbiCache::init(None, true) {
-        eprintln!("Warning: Failed to initialize cache: {}", e);
-    }
+    let _ = cache::AbiCache::init(None, true);
+
     m.add_class::<ABIParam>()?;
     m.add_class::<ABIFunction>()?;
     m.add_class::<ABIEventParam>()?;
@@ -977,9 +1009,14 @@ fn heimdall_py(py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<ABIError>()?;
     m.add_class::<StorageSlot>()?;
     m.add_class::<ABI>()?;
+
     m.add_function(wrap_pyfunction!(decompile_code, m)?)?;
     m.add_function(wrap_pyfunction!(configure_cache, m)?)?;
     m.add_function(wrap_pyfunction!(clear_cache, m)?)?;
     m.add_function(wrap_pyfunction!(get_cache_stats, m)?)?;
+
+    m.add("DecompileError", py.get_type::<DecompileError>())?;
+    m.add("DecompileTimeoutError", py.get_type::<DecompileTimeoutError>())?;
+
     Ok(())
 }
