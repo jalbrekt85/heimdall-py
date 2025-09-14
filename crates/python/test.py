@@ -1,6 +1,7 @@
-from heimdall_py import decompile_code
+from heimdall_py import decompile_code, configure_cache, clear_cache, get_cache_stats
 import pickle
 import copy
+import time
 
 import heimdall_py
 print(f"Using heimdall-py from: {heimdall_py.__file__}")
@@ -766,6 +767,232 @@ def test_templedao_selector_mismatch():
         print("\n✓ TempleDAO selector test passed")
     return len(errors) == 0
 
+def test_storage_layout_extraction():
+    print("\n=== Storage Layout Extraction Test ===")
+    errors = []
+
+    # Test with ERC20 (Dai) contract - it has known storage layout
+    print("\n1. DAI CONTRACT STORAGE LAYOUT:")
+    print("-" * 40)
+    abi_with_storage = decompile_code(erc20, skip_resolving=False, extract_storage=True)
+
+    # Check that we got storage layout
+    check(abi_with_storage.storage_layout is not None, "Storage layout is not None", errors)
+    check(len(abi_with_storage.storage_layout) > 0, f"Storage layout has entries (got {len(abi_with_storage.storage_layout)})", errors)
+
+    if abi_with_storage.storage_layout:
+        print(f"  Total slots found: {len(abi_with_storage.storage_layout)}")
+        print("\n  Complete Dai storage layout:")
+
+        # Check for expected storage slots in Dai contract
+        # Dai typically has wards (slot 0), totalSupply (slot 1), balanceOf mapping, etc.
+        slot_indices = [slot.index for slot in abi_with_storage.storage_layout]
+
+        # Check that we have slot 0 (usually wards or similar admin mapping)
+        check(0 in slot_indices, "Found slot 0 (admin/wards)", errors)
+
+        # Check that we have slot 1 (often totalSupply or similar)
+        check(1 in slot_indices, "Found slot 1 (totalSupply or similar)", errors)
+
+        # Print ALL storage slots for Dai
+        for i, slot in enumerate(abi_with_storage.storage_layout):
+            print(f"    Slot {slot.index:3d}, offset {slot.offset:2d}: {slot.typ}")
+
+            # Check slot attributes for first 5
+            if i < 5:
+                check(hasattr(slot, 'index'), f"Slot {i} has index attribute", errors)
+                check(hasattr(slot, 'offset'), f"Slot {i} has offset attribute", errors)
+                check(hasattr(slot, 'typ'), f"Slot {i} has typ attribute", errors)
+                check(isinstance(slot.index, int), f"Slot {i} index is integer", errors)
+                check(isinstance(slot.offset, int), f"Slot {i} offset is integer", errors)
+                check(isinstance(slot.typ, str), f"Slot {i} typ is string", errors)
+
+    # Test with WETH contract
+    print("\n2. WETH CONTRACT STORAGE LAYOUT:")
+    print("-" * 40)
+    weth_abi = decompile_code(weth, skip_resolving=False, extract_storage=True)
+
+    check(weth_abi.storage_layout is not None, "WETH storage layout is not None", errors)
+    check(len(weth_abi.storage_layout) > 0, f"WETH storage layout has entries (got {len(weth_abi.storage_layout)})", errors)
+
+    if weth_abi.storage_layout:
+        print(f"  Total slots found: {len(weth_abi.storage_layout)}")
+        print("\n  Complete WETH storage layout:")
+
+        # Print ALL storage slots for WETH
+        for slot in weth_abi.storage_layout:
+            print(f"    Slot {slot.index:3d}, offset {slot.offset:2d}: {slot.typ}")
+
+    # Test that storage extraction is enabled by default
+    print("\n4. Testing that extract_storage defaults to True...")
+    print("-" * 40)
+    abi_default = decompile_code(weth, skip_resolving=False)  # Not specifying extract_storage
+    check(abi_default.storage_layout is not None, "Storage layout exists with default", errors)
+    check(len(abi_default.storage_layout) > 0, f"Storage layout extracted by default (got {len(abi_default.storage_layout)} slots)", errors)
+    print(f"  Default extraction got {len(abi_default.storage_layout)} slots (should match WETH above)")
+
+    # Test that storage extraction can be disabled
+    print("\n5. Testing with storage extraction explicitly disabled...")
+    print("-" * 40)
+    abi_no_storage = decompile_code(weth, skip_resolving=False, extract_storage=False)
+    check(abi_no_storage.storage_layout is not None, "Storage layout exists (empty list)", errors)
+    check(len(abi_no_storage.storage_layout) == 0, "Storage layout is empty when extraction disabled", errors)
+    print(f"  Disabled extraction got {len(abi_no_storage.storage_layout)} slots (should be 0)")
+
+    # Test that storage layout is preserved through pickle
+    print("\nTesting storage layout pickle persistence...")
+    if abi_with_storage.storage_layout:
+        import pickle
+        pickled = pickle.dumps(abi_with_storage)
+        restored = pickle.loads(pickled)
+
+        check(len(restored.storage_layout) == len(abi_with_storage.storage_layout),
+              "Storage layout preserved through pickle", errors)
+
+        if restored.storage_layout and abi_with_storage.storage_layout:
+            first_orig = abi_with_storage.storage_layout[0]
+            first_restored = restored.storage_layout[0]
+            check(first_orig.index == first_restored.index, "Storage slot index preserved", errors)
+            check(first_orig.offset == first_restored.offset, "Storage slot offset preserved", errors)
+            check(first_orig.typ == first_restored.typ, "Storage slot type preserved", errors)
+
+    # Test with UniV2Pair for more complex storage
+    print("\n3. UNISWAP V2 PAIR CONTRACT STORAGE LAYOUT:")
+    print("-" * 40)
+    univ2_abi = decompile_code(univ2pair, skip_resolving=False, extract_storage=True)
+
+    if univ2_abi.storage_layout:
+        print(f"  Total slots found: {len(univ2_abi.storage_layout)}")
+        print("\n  Complete UniV2Pair storage layout:")
+
+        # Print ALL storage slots for UniV2Pair
+        for slot in univ2_abi.storage_layout:
+            print(f"    Slot {slot.index:3d}, offset {slot.offset:2d}: {slot.typ}")
+
+        # UniV2Pair has complex storage with reserves, token addresses, etc.
+        # Check for variety of types
+        types_found = set(slot.typ for slot in univ2_abi.storage_layout)
+        print(f"\n  Unique types found: {len(types_found)}")
+        print(f"  Types: {sorted(types_found)}")
+
+        # Should have multiple different types
+        check(len(types_found) > 1, "Multiple storage types found in UniV2Pair", errors)
+
+    if errors:
+        print(f"\n❌ Storage layout extraction test had {len(errors)} failures")
+    else:
+        print("\n✓ Storage layout extraction test passed")
+    return len(errors) == 0
+
+def test_cache_comprehensive():
+    print("\n=== Comprehensive Cache Test ===")
+    errors = []
+
+    # Test 1: Cache disabled vs enabled performance
+    print("\n1. Testing performance without cache vs with cache:")
+    configure_cache(enabled=False)
+
+    # Run 100 decompilations without cache
+    print("   Running 100 decompilations WITHOUT cache...")
+    start = time.time()
+    for i in range(100):
+        abi = decompile_code(weth, skip_resolving=False, use_cache=False)
+    time_without_cache = time.time() - start
+    print(f"   Time without cache: {time_without_cache:.2f}s")
+
+    # Enable cache and test
+    configure_cache(enabled=True)
+    clear_cache()
+
+    print("   Running 100 decompilations WITH cache...")
+    start = time.time()
+    for i in range(100):
+        abi = decompile_code(weth, skip_resolving=False, use_cache=True)
+    time_with_cache = time.time() - start
+    print(f"   Time with cache: {time_with_cache:.2f}s")
+
+    speedup = time_without_cache / time_with_cache
+    print(f"   Speedup: {speedup:.1f}x faster with cache")
+    check(speedup > 10, f"Cache provides >10x speedup (got {speedup:.1f}x)", errors)
+
+    # Test 2: Verify cache hit/miss statistics
+    print("\n2. Testing cache statistics:")
+    clear_cache()
+
+    # First call should miss
+    abi1 = decompile_code(weth, skip_resolving=False, use_cache=True)
+    stats = get_cache_stats()
+    check(stats['misses'] == 1, f"First call is a miss (misses={stats['misses']})", errors)
+    check(stats['hits'] == 0, f"No hits yet (hits={stats['hits']})", errors)
+
+    # Second call should hit
+    abi2 = decompile_code(weth, skip_resolving=False, use_cache=True)
+    stats = get_cache_stats()
+    check(stats['hits'] == 1, f"Second call is a hit (hits={stats['hits']})", errors)
+    check(stats['misses'] == 1, f"Still one miss (misses={stats['misses']})", errors)
+
+    # Test 3: Separate caching for resolved/unresolved
+    print("\n3. Testing separate caching for resolved/unresolved:")
+    clear_cache()
+
+    # Decompile with resolving
+    abi_resolved = decompile_code(erc20, skip_resolving=False, use_cache=True)
+    stats1 = get_cache_stats()
+
+    # Decompile without resolving (should be separate cache entry)
+    abi_unresolved = decompile_code(erc20, skip_resolving=True, use_cache=True)
+    stats2 = get_cache_stats()
+
+    check(stats2['misses'] == 2, f"Two different cache entries (misses={stats2['misses']})", errors)
+
+    # Verify the ABIs are different
+    resolved_names = {f.name for f in abi_resolved.functions if not f.name.startswith("Unresolved_")}
+    unresolved_names = {f.name for f in abi_unresolved.functions if f.name.startswith("Unresolved_")}
+    check(len(resolved_names) > 0, "Resolved ABI has resolved names", errors)
+    check(len(unresolved_names) > 0, "Unresolved ABI has unresolved names", errors)
+
+    # Test 4: Test with thousands of contracts
+    print("\n4. Testing with thousands of decompilations:")
+    clear_cache()
+
+    print("   Running 1000 decompilations...")
+    start = time.time()
+    for i in range(1000):
+        if i % 100 == 0:
+            print(f"     Progress: {i}/1000")
+        abi = decompile_code(weth, skip_resolving=False, use_cache=True)
+    elapsed = time.time() - start
+
+    stats = get_cache_stats()
+    print(f"   Completed 1000 decompilations in {elapsed:.2f}s")
+    print(f"   Stats: hits={stats['hits']}, misses={stats['misses']}")
+    check(stats['hits'] == 999, f"999 cache hits expected (got {stats['hits']})", errors)
+    check(stats['misses'] == 1, f"1 cache miss expected (got {stats['misses']})", errors)
+
+    ops_per_sec = 1000 / elapsed
+    print(f"   Performance: {ops_per_sec:.0f} ops/sec")
+    check(ops_per_sec > 100, f"Should handle >100 ops/sec (got {ops_per_sec:.0f})", errors)
+
+    # Test 5: Cache persistence across calls
+    print("\n5. Testing cache persistence:")
+    # Don't clear cache - it should still have the data
+    stats_before = get_cache_stats()
+
+    # This should hit the existing cache
+    abi = decompile_code(weth, skip_resolving=False, use_cache=True)
+    stats_after = get_cache_stats()
+
+    check(stats_after['hits'] == stats_before['hits'] + 1,
+          f"Cache persists across calls (hits increased from {stats_before['hits']} to {stats_after['hits']})", errors)
+
+    if errors:
+        print(f"\n❌ Cache comprehensive test had {len(errors)} failures")
+        for error in errors:
+            print(f"   - {error}")
+    else:
+        print("\n✓ Cache comprehensive test passed")
+    return len(errors) == 0
+
 if __name__ == "__main__":
     print("Running comprehensive contract tests...")
     all_passed = True
@@ -777,6 +1004,8 @@ if __name__ == "__main__":
     all_passed &= test_pickle_and_lookups()
     all_passed &= test_from_json()
     all_passed &= test_templedao_selector_mismatch()
+    all_passed &= test_storage_layout_extraction()
+    all_passed &= test_cache_comprehensive()
 
     if all_passed:
         print("\n✅ All comprehensive tests passed!")

@@ -143,6 +143,8 @@ class ABI:
 def decompile_code(
     code: str,
     skip_resolving: bool = False,
+    extract_storage: bool = True,
+    use_cache: bool = True,
     rpc_url: Optional[str] = None,
     timeout_secs: Optional[int] = None
 ) -> ABI:
@@ -152,11 +154,13 @@ def decompile_code(
     Args:
         code: Hex-encoded bytecode string (with or without 0x prefix) or contract address
         skip_resolving: If True, skip signature resolution from external databases
+        extract_storage: If True, extract storage layout from bytecode
+        use_cache: If True, use LMDB cache for storing/retrieving ABIs
         rpc_url: Optional RPC URL for fetching bytecode from contract addresses
         timeout_secs: Optional timeout in seconds (default: 25 seconds)
 
     Returns:
-        ABI object containing all functions, events, errors, and special functions
+        ABI object containing all functions, events, errors, special functions, and optionally storage layout
 
     Raises:
         RuntimeError: If decompilation fails
@@ -169,6 +173,11 @@ def decompile_code(
         >>> for func in abi.functions:
         ...     print(f"{func.name}({', '.join(p.type_ for p in func.inputs)})")
         >>>
+        >>> # Extract storage layout along with ABI
+        >>> abi = decompile_code(bytecode, extract_storage=True)
+        >>> for slot in abi.storage_layout:
+        ...     print(f"Slot {slot.index}: {slot.typ}")
+        >>>
         >>> # Skip signature resolution for faster decompilation
         >>> abi = decompile_code(bytecode, skip_resolving=True)
         >>>
@@ -179,5 +188,59 @@ def decompile_code(
         >>> func = abi.get_function("0x70a08231")  # balanceOf selector
         >>> if func:
         ...     print(f"Found: {func.name}")
+    """
+    ...
+
+def configure_cache(
+    enabled: bool = True,
+    directory: Optional[str] = None
+) -> None:
+    """
+    Configure the ABI cache settings.
+
+    Args:
+        enabled: Whether to enable caching
+        directory: Optional custom cache directory path. If not provided, uses:
+                  - Linux: ~/.cache/heimdall/
+                  - macOS: ~/Library/Caches/heimdall/
+                  - Windows: %LOCALAPPDATA%\\heimdall\\cache\\
+                  - Or $HEIMDALL_CACHE_DIR if set
+
+    Example:
+        >>> # Disable caching
+        >>> configure_cache(enabled=False)
+        >>>
+        >>> # Use custom cache directory
+        >>> configure_cache(directory="/tmp/my_cache")
+    """
+    ...
+
+def clear_cache() -> None:
+    """
+    Clear all entries from the ABI cache.
+
+    Example:
+        >>> clear_cache()
+        >>> # All cached ABIs are now removed
+    """
+    ...
+
+def get_cache_stats() -> dict:
+    """
+    Get statistics about cache usage.
+
+    Returns:
+        Dictionary with cache statistics:
+        - hits: Number of cache hits
+        - misses: Number of cache misses
+        - writes: Number of successful cache writes
+        - errors: Number of cache errors
+        - hit_rate: Ratio of hits to total requests (0.0 to 1.0)
+        - enabled: Whether cache is currently enabled
+
+    Example:
+        >>> stats = get_cache_stats()
+        >>> print(f"Cache hit rate: {stats['hit_rate']:.2%}")
+        >>> print(f"Total hits: {stats['hits']}")
     """
     ...

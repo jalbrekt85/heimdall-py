@@ -3,15 +3,19 @@ use heimdall_decompiler::{decompile, DecompilerArgsBuilder};
 use indexmap::IndexMap;
 use pyo3::exceptions::{PyRuntimeError, PyTimeoutError, PyIOError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyDict};
 use serde::{Serialize, Deserialize};
 use serde_json::Value;
 use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 use tiny_keccak::{Hasher, Keccak};
+use storage_layout_extractor::{self as sle, extractor::{chain::{version::EthereumVersion, Chain}, contract::Contract}};
+
+mod cache;
 
 #[pyclass(module = "heimdall_py")]
 #[derive(Clone, Serialize, Deserialize)]
@@ -94,6 +98,24 @@ impl StorageSlot {
     #[pyo3(signature = (index=0, offset=0, typ=String::new()))]
     fn new(index: u64, offset: u32, typ: String) -> Self {
         StorageSlot { index, offset, typ }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("StorageSlot(index={}, offset={}, typ='{}')",
+                self.index, self.offset, self.typ)
+    }
+}
+
+impl From<sle::layout::StorageSlot> for StorageSlot {
+    fn from(slot: sle::layout::StorageSlot) -> Self {
+        let index_str = format!("{:?}", slot.index);
+        let index = index_str.parse::<u64>().unwrap_or(0);
+
+        StorageSlot {
+            index,
+            offset: slot.offset as u32,
+            typ: slot.typ.to_solidity_type(),
+        }
     }
 }
 
@@ -648,12 +670,20 @@ fn convert_function(func: &Function) -> ABIFunction {
 }
 
 #[pyfunction]
-#[pyo3(signature = (code, skip_resolving=false, rpc_url=None, timeout_secs=None))]
-fn decompile_code(_py: Python<'_>, code: String, skip_resolving: bool, rpc_url: Option<String>, timeout_secs: Option<u64>) -> PyResult<ABI> {
+#[pyo3(signature = (code, skip_resolving=false, extract_storage=true, use_cache=true, rpc_url=None, timeout_secs=None))]
+fn decompile_code(py: Python<'_>, code: String, skip_resolving: bool, extract_storage: bool, use_cache: bool, rpc_url: Option<String>, timeout_secs: Option<u64>) -> PyResult<ABI> {
+    if use_cache && cache::AbiCache::is_enabled() {
+        if let Some(cached_data) = cache::AbiCache::get(&code, skip_resolving) {
+            let abi: ABI = bincode::deserialize(&cached_data)
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to deserialize cached ABI: {}", e)))?;
+            return Ok(abi);
+        }
+    }
+
     let timeout_ms = timeout_secs.unwrap_or(25).saturating_mul(1000);
     let timeout_duration = Duration::from_millis(timeout_ms);
     let args = DecompilerArgsBuilder::new()
-        .target(code)
+        .target(code.clone())
         .rpc_url(rpc_url.unwrap_or_default())
         .default(true)
         .skip_resolving(skip_resolving)
@@ -778,6 +808,94 @@ fn decompile_code(_py: Python<'_>, code: String, skip_resolving: bool, rpc_url: 
         }
     }
     
+    let storage_layout = if extract_storage {
+        let bytecode_str = code.strip_prefix("0x").unwrap_or(&code);
+
+        let bytes = hex::decode(bytecode_str)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to decode bytecode for storage extraction: {}", e)))?;
+
+        let contract = Contract::new(
+            bytes,
+            Chain::Ethereum {
+                version: EthereumVersion::Shanghai,
+            },
+        );
+
+        let extract_timeout = timeout_secs.unwrap_or(25);
+
+        py.allow_threads(move || {
+            let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<StorageSlot>, String>>();
+            let done = Arc::new(AtomicBool::new(false));
+            let done_clone = done.clone();
+
+            let handle = thread::spawn(move || {
+                let watchdog = sle::watchdog::FlagWatchdog::new(done_clone).in_rc();
+
+                let result = sle::new(
+                    contract,
+                    sle::vm::Config::default(),
+                    sle::tc::Config::default(),
+                    watchdog,
+                )
+                .analyze();
+
+                match result {
+                    Ok(layout) => {
+                        let slots: Vec<StorageSlot> = layout
+                            .slots()
+                            .iter()
+                            .filter(|slot| {
+                                let typ = slot.typ.to_solidity_type();
+                                typ != "unknown"
+                            })
+                            .map(|slot| slot.clone().into())
+                            .collect();
+                        let _ = tx.send(Ok(slots));
+                    },
+                    Err(e) => {
+                        if format!("{:?}", e).contains("StoppedByWatchdog") {
+                            eprintln!("Storage extraction stopped by timeout after {} seconds", extract_timeout);
+                            let _ = tx.send(Ok(Vec::new()));
+                        } else {
+                            // Log error but don't fail - storage extraction is optional
+                            eprintln!("Storage extraction failed: {:?}", e);
+                            let _ = tx.send(Ok(Vec::new()));
+                        }
+                    }
+                }
+            });
+
+            match rx.recv_timeout(Duration::from_secs(extract_timeout)) {
+                Ok(Ok(slots)) => {
+                    done.store(true, Ordering::SeqCst);
+                    let _ = handle.join();
+                    Ok(slots)
+                },
+                Ok(Err(_)) => {
+                    done.store(true, Ordering::SeqCst);
+                    let _ = handle.join();
+                    Ok(Vec::new())
+                },
+                Err(_) => {
+                    done.store(true, Ordering::SeqCst);
+                    match rx.recv_timeout(Duration::from_millis(100)) {
+                        Ok(Ok(slots)) => {
+                            let _ = handle.join();
+                            Ok(slots)
+                        },
+                        _ => {
+                            eprintln!("Storage extraction timed out after {} seconds", extract_timeout);
+                            let _ = handle.join();
+                            Ok(Vec::new())
+                        }
+                    }
+                }
+            }
+        }).unwrap_or_else(|_: PyErr| Vec::new())
+    } else {
+        Vec::new()
+    };
+
     let abi = ABI {
         functions,
         events,
@@ -785,16 +903,73 @@ fn decompile_code(_py: Python<'_>, code: String, skip_resolving: bool, rpc_url: 
         constructor,
         fallback,
         receive,
-        storage_layout: Vec::new(),
+        storage_layout,
         by_selector,
         by_name,
     };
-    
+
+    if use_cache && cache::AbiCache::is_enabled() {
+        let serialized = bincode::serialize(&abi)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to serialize ABI for caching: {}", e)))?;
+
+        if let Err(e) = cache::AbiCache::put(&code, skip_resolving, &serialized) {
+            eprintln!("Warning: Failed to cache ABI: {}", e);
+        }
+    }
+
     Ok(abi)
 }
 
+#[pyfunction]
+#[pyo3(signature = (enabled=true, directory=None))]
+fn configure_cache(_py: Python<'_>, enabled: bool, directory: Option<String>) -> PyResult<()> {
+    let dir_path = directory.map(PathBuf::from);
+
+    cache::AbiCache::init(dir_path, enabled)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to configure cache: {}", e)))?;
+
+    if enabled && !cache::AbiCache::is_enabled() {
+        cache::AbiCache::init(None, true)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to initialize cache: {}", e)))?;
+    }
+
+    Ok(())
+}
+
+#[pyfunction]
+fn clear_cache(_py: Python<'_>) -> PyResult<()> {
+    cache::AbiCache::clear()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to clear cache: {}", e)))?;
+    Ok(())
+}
+
+#[pyfunction]
+fn get_cache_stats(py: Python<'_>) -> PyResult<PyObject> {
+    let stats = cache::AbiCache::get_stats();
+
+    let dict = PyDict::new(py);
+    dict.set_item("hits", stats.hits)?;
+    dict.set_item("misses", stats.misses)?;
+    dict.set_item("writes", stats.writes)?;
+    dict.set_item("errors", stats.errors)?;
+
+    let total_requests = stats.hits + stats.misses;
+    let hit_rate = if total_requests > 0 {
+        stats.hits as f64 / total_requests as f64
+    } else {
+        0.0
+    };
+    dict.set_item("hit_rate", hit_rate)?;
+    dict.set_item("enabled", cache::AbiCache::is_enabled())?;
+
+    Ok(dict.into())
+}
+
 #[pymodule]
-fn heimdall_py(_py: Python, m: &PyModule) -> PyResult<()> {
+fn heimdall_py(py: Python, m: &PyModule) -> PyResult<()> {
+    if let Err(e) = cache::AbiCache::init(None, true) {
+        eprintln!("Warning: Failed to initialize cache: {}", e);
+    }
     m.add_class::<ABIParam>()?;
     m.add_class::<ABIFunction>()?;
     m.add_class::<ABIEventParam>()?;
@@ -803,5 +978,8 @@ fn heimdall_py(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<StorageSlot>()?;
     m.add_class::<ABI>()?;
     m.add_function(wrap_pyfunction!(decompile_code, m)?)?;
+    m.add_function(wrap_pyfunction!(configure_cache, m)?)?;
+    m.add_function(wrap_pyfunction!(clear_cache, m)?)?;
+    m.add_function(wrap_pyfunction!(get_cache_stats, m)?)?;
     Ok(())
 }
