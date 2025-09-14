@@ -35,8 +35,6 @@ jobs:
         with:
           ref: ${{ inputs.sha }}
           submodules: recursive
-      - name: Remove lockfile to force fresh dependencies
-        run: rm -f Cargo.lock
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:

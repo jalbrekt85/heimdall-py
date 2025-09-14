@@ -2,7 +2,6 @@
 */debug
 */src/debug
 
-Cargo.lock
 *.rustc_info.json
 out.json
 .idea
