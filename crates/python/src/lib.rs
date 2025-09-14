@@ -1,14 +1,17 @@
 use alloy_json_abi::{Function, EventParam, Param, StateMutability};
 use heimdall_decompiler::{decompile, DecompilerArgsBuilder};
 use indexmap::IndexMap;
-use pyo3::exceptions::{PyRuntimeError, PyTimeoutError};
+use pyo3::exceptions::{PyRuntimeError, PyTimeoutError, PyIOError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use serde::{Serialize, Deserialize};
+use serde_json::Value;
+use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
+use tiny_keccak::{Hasher, Keccak};
 
 #[pyclass(module = "heimdall_py")]
 #[derive(Clone, Serialize, Deserialize)]
@@ -143,6 +146,274 @@ fn state_mutability_to_string(sm: StateMutability) -> String {
     }.to_string()
 }
 
+// Helper function to collapse tuple types
+fn collapse_if_tuple(component: &Value) -> PyResult<String> {
+    let typ = component.get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if !typ.starts_with("tuple") {
+        return Ok(typ.to_string());
+    }
+
+    let components = component.get("components")
+        .and_then(|v| v.as_array());
+
+    let components = match components {
+        Some(comps) => comps,
+        None => return Ok(typ.to_string()),
+    };
+
+    if components.is_empty() {
+        return Ok(typ.to_string());
+    }
+
+    let mut collapsed_components = Vec::new();
+    for comp in components {
+        collapsed_components.push(collapse_if_tuple(comp)?);
+    }
+
+    let delimited = collapsed_components.join(",");
+    let array_dim = &typ[5..]; // Everything after "tuple"
+    Ok(format!("({}){}", delimited, array_dim))
+}
+
+fn parse_param(param: &Value) -> PyResult<ABIParam> {
+    let name = param.get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let type_ = collapse_if_tuple(param)?;
+
+    let internal_type = param.get("internalType")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    Ok(ABIParam {
+        name,
+        type_,
+        internal_type,
+    })
+}
+
+fn parse_event_param(param: &Value) -> PyResult<ABIEventParam> {
+    let name = param.get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let type_ = collapse_if_tuple(param)?;
+
+    let indexed = param.get("indexed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let internal_type = param.get("internalType")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    Ok(ABIEventParam {
+        name,
+        type_,
+        indexed,
+        internal_type,
+    })
+}
+
+fn compute_selector(name: &str, input_types: &[String]) -> [u8; 4] {
+    let signature = format!("{}({})", name, input_types.join(","));
+    let mut hasher = Keccak::v256();
+    hasher.update(signature.as_bytes());
+    let mut output = [0u8; 32];
+    hasher.finalize(&mut output);
+    let mut selector = [0u8; 4];
+    selector.copy_from_slice(&output[..4]);
+    selector
+}
+
+fn parse_function_entry(entry: &Value) -> PyResult<Option<ABIFunction>> {
+    let name = entry.get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if name.is_empty() {
+        return Ok(None);
+    }
+
+    let inputs_json = entry.get("inputs")
+        .and_then(|v| v.as_array());
+
+    let mut inputs = Vec::new();
+    let mut input_types = Vec::new();
+
+    if let Some(inputs_json) = inputs_json {
+        for input in inputs_json {
+            let param = parse_param(input)?;
+            input_types.push(param.type_.clone());
+            inputs.push(param);
+        }
+    }
+
+    let outputs_json = entry.get("outputs")
+        .and_then(|v| v.as_array());
+
+    let mut outputs = Vec::new();
+    if let Some(outputs_json) = outputs_json {
+        for output in outputs_json {
+            outputs.push(parse_param(output)?);
+        }
+    }
+
+    let state_mutability = entry.get("stateMutability")
+        .and_then(|v| v.as_str())
+        .unwrap_or("nonpayable")
+        .to_string();
+
+    let constant = state_mutability == "view" || state_mutability == "pure";
+    let payable = state_mutability == "payable";
+
+    let selector = compute_selector(&name, &input_types);
+    let signature = format!("{}({})", name, input_types.join(","));
+
+    Ok(Some(ABIFunction {
+        name,
+        inputs,
+        outputs,
+        state_mutability,
+        constant,
+        payable,
+        selector,
+        signature,
+    }))
+}
+
+fn parse_event_entry(entry: &Value) -> PyResult<Option<ABIEvent>> {
+    let name = entry.get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if name.is_empty() {
+        return Ok(None);
+    }
+
+    let inputs_json = entry.get("inputs")
+        .and_then(|v| v.as_array());
+
+    let mut inputs = Vec::new();
+    if let Some(inputs_json) = inputs_json {
+        for input in inputs_json {
+            inputs.push(parse_event_param(input)?);
+        }
+    }
+
+    let anonymous = entry.get("anonymous")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    Ok(Some(ABIEvent {
+        name,
+        inputs,
+        anonymous,
+    }))
+}
+
+fn parse_error_entry(entry: &Value) -> PyResult<Option<ABIError>> {
+    let name = entry.get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if name.is_empty() {
+        return Ok(None);
+    }
+
+    let inputs_json = entry.get("inputs")
+        .and_then(|v| v.as_array());
+
+    let mut inputs = Vec::new();
+    if let Some(inputs_json) = inputs_json {
+        for input in inputs_json {
+            inputs.push(parse_param(input)?);
+        }
+    }
+
+    Ok(Some(ABIError {
+        name,
+        inputs,
+    }))
+}
+
+fn parse_constructor_entry(entry: &Value) -> PyResult<Option<ABIFunction>> {
+    let inputs_json = entry.get("inputs")
+        .and_then(|v| v.as_array());
+
+    let mut inputs = Vec::new();
+    let mut input_types = Vec::new();
+
+    if let Some(inputs_json) = inputs_json {
+        for input in inputs_json {
+            let param = parse_param(input)?;
+            input_types.push(param.type_.clone());
+            inputs.push(param);
+        }
+    }
+
+    let state_mutability = entry.get("stateMutability")
+        .and_then(|v| v.as_str())
+        .unwrap_or("nonpayable")
+        .to_string();
+
+    let payable = state_mutability == "payable";
+    let signature = format!("constructor({})", input_types.join(","));
+
+    Ok(Some(ABIFunction {
+        name: "constructor".to_string(),
+        inputs,
+        outputs: Vec::new(),
+        state_mutability,
+        constant: false,
+        payable,
+        selector: [0; 4],
+        signature,
+    }))
+}
+
+fn parse_fallback_entry(entry: &Value) -> PyResult<Option<ABIFunction>> {
+    let state_mutability = entry.get("stateMutability")
+        .and_then(|v| v.as_str())
+        .unwrap_or("nonpayable")
+        .to_string();
+
+    let payable = state_mutability == "payable";
+
+    Ok(Some(ABIFunction {
+        name: "fallback".to_string(),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        state_mutability,
+        constant: false,
+        payable,
+        selector: [0; 4],
+        signature: "fallback()".to_string(),
+    }))
+}
+
+fn parse_receive_entry(_entry: &Value) -> PyResult<Option<ABIFunction>> {
+    Ok(Some(ABIFunction {
+        name: "receive".to_string(),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        state_mutability: "payable".to_string(),
+        constant: false,
+        payable: true,
+        selector: [0; 4],
+        signature: "receive()".to_string(),
+    }))
+}
+
 #[pymethods]
 impl ABIFunction {
     #[getter]
@@ -182,7 +453,77 @@ impl ABI {
             by_name: IndexMap::new(),
         }
     }
-    
+
+    #[staticmethod]
+    fn from_json(file_path: String) -> PyResult<Self> {
+        // Read the JSON file
+        let contents = fs::read_to_string(&file_path)
+            .map_err(|e| PyIOError::new_err(format!("Failed to read file {}: {}", file_path, e)))?;
+
+        // Parse the JSON
+        let json_value: Value = serde_json::from_str(&contents)
+            .map_err(|e| PyValueError::new_err(format!("Invalid JSON: {}", e)))?;
+
+        // Parse the ABI array
+        let abi_array = if let Some(obj) = json_value.as_object() {
+            // Handle { "abi": [...] } format
+            obj.get("abi")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| PyValueError::new_err("Expected 'abi' field with array"))?
+        } else if let Some(arr) = json_value.as_array() {
+            // Handle direct array format
+            arr
+        } else {
+            return Err(PyValueError::new_err("JSON must be an array or object with 'abi' field"));
+        };
+
+        let mut abi = ABI::new();
+
+        // Process each entry in the ABI
+        for entry in abi_array {
+            let entry_type = entry.get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            match entry_type {
+                "function" => {
+                    if let Some(func) = parse_function_entry(entry)? {
+                        let idx = abi.functions.len();
+                        abi.by_selector.insert(func.selector, idx);
+                        if !func.name.is_empty() {
+                            abi.by_name.insert(func.name.clone(), idx);
+                        }
+                        abi.functions.push(func);
+                    }
+                },
+                "event" => {
+                    if let Some(event) = parse_event_entry(entry)? {
+                        abi.events.push(event);
+                    }
+                },
+                "error" => {
+                    if let Some(error) = parse_error_entry(entry)? {
+                        abi.errors.push(error);
+                    }
+                },
+                "constructor" => {
+                    abi.constructor = parse_constructor_entry(entry)?;
+                },
+                "fallback" => {
+                    abi.fallback = parse_fallback_entry(entry)?;
+                },
+                "receive" => {
+                    abi.receive = parse_receive_entry(entry)?;
+                },
+                _ => {
+                    // Skip unknown types
+                }
+            }
+        }
+
+        Ok(abi)
+    }
+
     fn get_function(&self, _py: Python, key: &PyAny) -> PyResult<Option<ABIFunction>> {
         // Try as string first
         if let Ok(name) = key.extract::<String>() {
@@ -285,6 +626,15 @@ impl ABI {
 }
 
 fn convert_function(func: &Function) -> ABIFunction {
+    let selector = if let Some(hex_part) = func.name.strip_prefix("Unresolved_") {
+        hex::decode(&hex_part[..8.min(hex_part.len())])
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .unwrap_or_else(|| func.selector().into())
+    } else {
+        func.selector().into()
+    };
+
     ABIFunction {
         name: func.name.clone(),
         inputs: func.inputs.iter().map(convert_param).collect(),
@@ -292,7 +642,7 @@ fn convert_function(func: &Function) -> ABIFunction {
         state_mutability: state_mutability_to_string(func.state_mutability),
         constant: matches!(func.state_mutability, StateMutability::Pure | StateMutability::View),
         payable: matches!(func.state_mutability, StateMutability::Payable),
-        selector: func.selector().into(),
+        selector,
         signature: func.signature(),
     }
 }
