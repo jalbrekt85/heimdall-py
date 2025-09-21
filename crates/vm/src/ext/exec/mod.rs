@@ -1,6 +1,7 @@
 mod jump_frame;
 mod util;
 
+use eyre::eyre;
 use crate::{
     core::{
         stack::Stack,
@@ -55,6 +56,11 @@ impl VM {
         // step through the bytecode until we reach the entry point
         while self.bytecode.len() >= self.instruction as usize && (self.instruction <= entry_point)
         {
+            // Check timeout before each step
+            if Instant::now() >= timeout {
+                return Err(eyre!("Execution timed out while reaching entry point"));
+            }
+
             self.step()?;
 
             // this shouldn't be necessary, but it's safer to have it

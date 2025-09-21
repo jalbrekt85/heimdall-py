@@ -10,23 +10,23 @@ use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tiny_keccak::{Hasher, Keccak};
 use storage_layout_extractor::{self as sle, extractor::{chain::{version::EthereumVersion, Chain}, contract::Contract}};
 use once_cell::sync::Lazy;
 
 mod cache;
 
+// Global tokio runtime - created once per process, reused for all decompilations
 static TOKIO_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)  // Limited threads to avoid overwhelming system
         .enable_all()
         .build()
         .expect("Failed to create tokio runtime")
 });
-
-static ABANDONED_THREADS: AtomicUsize = AtomicUsize::new(0);
 
 create_exception!(heimdall_py, DecompileError, PyException, "Base exception for expected decompilation failures");
 create_exception!(heimdall_py, DecompileTimeoutError, DecompileError, "Decompilation timed out");
@@ -194,7 +194,7 @@ fn parse_function_entry(entry: &serde_json::Map<String, Value>) -> PyResult<Opti
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let inputs: Vec<ABIParam> = entry.get("inputs")
+    let inputs = entry.get("inputs")
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter()
             .filter_map(|input| {
@@ -318,7 +318,7 @@ fn parse_error_entry(entry: &serde_json::Map<String, Value>) -> PyResult<Option<
 }
 
 fn parse_constructor_entry(entry: &serde_json::Map<String, Value>) -> PyResult<Option<ABIFunction>> {
-    let inputs: Vec<ABIParam> = entry.get("inputs")
+    let inputs = entry.get("inputs")
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter()
             .filter_map(|input| {
@@ -426,7 +426,7 @@ impl ABI {
             array
         } else {
             return Err(PyValueError::new_err("JSON must be either an array or an object with 'abi' field"));
-        };
+        }?;
 
         let mut abi = ABI::new();
 
@@ -625,7 +625,7 @@ fn convert_function(func: &Function) -> ABIFunction {
         state_mutability: state_mutability_to_string(func.state_mutability),
         constant: matches!(func.state_mutability, StateMutability::Pure | StateMutability::View),
         payable: matches!(func.state_mutability, StateMutability::Payable),
-        selector: *func.selector(),
+        selector: func.selector(),
         signature,
     }
 }
@@ -790,10 +790,9 @@ fn decompile_code(py: Python<'_>, code: String, skip_resolving: bool, extract_st
                 let done_clone = done.clone();
 
                 let handle = thread::spawn(move || {
+                    // Wrap SLE execution in catch_unwind to handle panics
                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let watchdog = sle::watchdog::FlagWatchdog::new(done_clone)
-                            .polling_every(100)  // Much more frequent than default
-                            .in_rc();
+                        let watchdog = sle::watchdog::FlagWatchdog::new(done_clone).in_rc();
 
                         let result = sle::new(
                             contract,
@@ -855,10 +854,7 @@ fn decompile_code(py: Python<'_>, code: String, skip_resolving: bool, extract_st
                         Err(e)
                     },
                     Err(_) => {
-                        // Timeout occurred - set flag and try bounded join
                         done.store(true, Ordering::SeqCst);
-
-                        // Give thread 100ms grace period to finish
                         match rx.recv_timeout(Duration::from_millis(100)) {
                             Ok(Ok(slots)) => {
                                 let _ = handle.join();
@@ -869,27 +865,7 @@ fn decompile_code(py: Python<'_>, code: String, skip_resolving: bool, extract_st
                                 Err(e)
                             },
                             _ => {
-                                // Thread still not responding after grace period
-                                // Try one more aggressive join attempt
-                                let join_start = Instant::now();
-                                let join_timeout = Duration::from_millis(100);
-
-                                // Busy wait for thread to finish (non-blocking check)
-                                while join_start.elapsed() < join_timeout {
-                                    // Check if we got a late response
-                                    if let Ok(result) = rx.try_recv() {
-                                        let _ = handle.join();
-                                        return result;
-                                    }
-                                    std::thread::sleep(Duration::from_millis(10));
-                                }
-
-                                std::mem::drop(handle);
-
-                                let abandoned_count = ABANDONED_THREADS.fetch_add(1, Ordering::Relaxed) + 1;
-                                eprintln!("WARNING: Storage extraction thread unresponsive after timeout - detached (total abandoned: {})",
-                                         abandoned_count);
-
+                                let _ = handle.join();
                                 Err(format!("Storage extraction timed out after {} seconds", extract_timeout))
                             }
                         }
@@ -978,7 +954,6 @@ fn get_cache_stats(py: Python<'_>) -> PyResult<PyObject> {
     };
     dict.set_item("hit_rate", hit_rate)?;
     dict.set_item("enabled", cache::AbiCache::is_enabled())?;
-    dict.set_item("abandoned_threads", ABANDONED_THREADS.load(Ordering::Relaxed))?;
 
     Ok(dict.into())
 }

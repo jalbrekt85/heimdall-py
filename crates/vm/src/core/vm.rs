@@ -1049,7 +1049,7 @@ impl VM {
                         output_operations: Vec::new(),
                     });
                 } else {
-                    self.instruction = pc + 1;
+                    self.instruction = pc.saturating_add(1);
                 }
             }
 
@@ -1081,7 +1081,7 @@ impl VM {
                             output_operations: Vec::new(),
                         });
                     } else {
-                        self.instruction = pc + 1;
+                        self.instruction = pc.saturating_add(1);
                     }
                 }
             }
