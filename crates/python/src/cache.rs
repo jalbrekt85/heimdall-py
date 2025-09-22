@@ -49,6 +49,7 @@ impl AbiCache {
         let env = Environment::new()
             .set_flags(EnvironmentFlags::NO_SUB_DIR)
             .set_map_size(10 * 1024 * 1024 * 1024)
+            .set_max_readers(8192)
             .set_max_dbs(1)
             .open(&cache_path)
             .map_err(|e| format!("Failed to open LMDB environment: {}", e))?;

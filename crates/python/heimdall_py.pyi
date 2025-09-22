@@ -31,22 +31,13 @@ class ABIFunction:
     payable: bool
 
     @property
-    def selector(self) -> List[int]:
-        """Returns the 4-byte function selector as a list of integers."""
+    def selector(self) -> bytes:
+        """Returns the 4-byte function selector as bytes."""
         ...
 
+    @property
     def signature(self) -> str:
         """Returns the function signature string."""
-        ...
-
-    @property
-    def input_types(self) -> List[str]:
-        """Returns a list of input parameter types."""
-        ...
-
-    @property
-    def output_types(self) -> List[str]:
-        """Returns a list of output parameter types."""
         ...
 
 class ABIEventParam:
@@ -142,12 +133,8 @@ class ABI:
         """Deserialize the ABI from pickle."""
         ...
 
-    def __deepcopy__(self, memo: dict) -> 'ABI':
-        """Create a deep copy of the ABI."""
-        ...
-
-    def __repr__(self) -> str:
-        """String representation of the ABI."""
+    def rebuild_indices(self) -> None:
+        """Rebuild internal indices for function lookup."""
         ...
 
 def decompile_code(
@@ -252,6 +239,7 @@ def get_cache_stats() -> dict:
         - errors: Number of cache errors
         - hit_rate: Ratio of hits to total requests (0.0 to 1.0)
         - enabled: Whether cache is currently enabled
+        - abandoned_threads: Number of threads that timed out and were abandoned
 
     Example:
         >>> stats = get_cache_stats()

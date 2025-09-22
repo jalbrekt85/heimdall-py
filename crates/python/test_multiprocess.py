@@ -17,7 +17,6 @@ def process_batch(args):
     try:
         print(f"  Batch {batch_id}: Starting with {len(contracts)} contracts", flush=True)
 
-        # Configure cache for this worker
         configure_cache(enabled=True, directory=cache_dir)
 
         processed = 0
@@ -106,7 +105,6 @@ def process_batch(args):
 def main():
     cache_dir = "/tmp/heimdall_multiprocess_test_cache"
     configure_cache(enabled=True, directory=cache_dir)
-    clear_cache()
 
     print(f"Cache directory: {cache_dir}")
 
