@@ -52,6 +52,10 @@ struct ABIFunction {
     #[pyo3(get)]
     outputs: Vec<ABIParam>,
     #[pyo3(get)]
+    input_types: Vec<String>,
+    #[pyo3(get)]
+    output_types: Vec<String>,
+    #[pyo3(get)]
     state_mutability: String,
     #[pyo3(get)]
     constant: bool,
@@ -210,7 +214,7 @@ fn parse_function_entry(entry: &serde_json::Map<String, Value>) -> PyResult<Opti
             .collect())
         .unwrap_or_default();
 
-    let outputs = entry.get("outputs")
+    let outputs: Vec<ABIParam> = entry.get("outputs")
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter()
             .filter_map(|output| {
@@ -245,10 +249,15 @@ fn parse_function_entry(entry: &serde_json::Map<String, Value>) -> PyResult<Opti
     hasher.finalize(&mut result);
     let selector: [u8; 4] = result[..4].try_into().unwrap();
 
+    let input_types = inputs.iter().map(|p| p.type_.clone()).collect();
+    let output_types = outputs.iter().map(|p| p.type_.clone()).collect();
+
     Ok(Some(ABIFunction {
         name: name.to_string(),
         inputs,
         outputs,
+        input_types,
+        output_types,
         state_mutability: state_mutability.clone(),
         constant: state_mutability == "view" || state_mutability == "pure",
         payable: state_mutability == "payable",
@@ -346,10 +355,15 @@ fn parse_constructor_entry(entry: &serde_json::Map<String, Value>) -> PyResult<O
             .collect::<Vec<_>>()
             .join(","));
 
+    let input_types = inputs.iter().map(|p| p.type_.clone()).collect();
+    let output_types = Vec::new();
+
     Ok(Some(ABIFunction {
         name: "constructor".to_string(),
         inputs,
         outputs: Vec::new(),
+        input_types,
+        output_types,
         state_mutability: state_mutability.clone(),
         constant: false,
         payable: state_mutability == "payable",
@@ -368,6 +382,8 @@ fn parse_fallback_entry(entry: &serde_json::Map<String, Value>) -> PyResult<Opti
         name: "fallback".to_string(),
         inputs: Vec::new(),
         outputs: Vec::new(),
+        input_types: Vec::new(),
+        output_types: Vec::new(),
         state_mutability: state_mutability.clone(),
         constant: false,
         payable: state_mutability == "payable",
@@ -381,6 +397,8 @@ fn parse_receive_entry(_entry: &serde_json::Map<String, Value>) -> PyResult<Opti
         name: "receive".to_string(),
         inputs: Vec::new(),
         outputs: Vec::new(),
+        input_types: Vec::new(),
+        output_types: Vec::new(),
         state_mutability: "payable".to_string(),
         constant: false,
         payable: true,
@@ -618,14 +636,41 @@ fn convert_function(func: &Function) -> ABIFunction {
             .collect::<Vec<_>>()
             .join(","));
 
+    // For unresolved functions, extract the actual selector from the name
+    // Otherwise use the calculated selector
+    let selector = if func.name.starts_with("Unresolved_") {
+        let hex_str = &func.name[11..]; // Skip "Unresolved_"
+        hex::decode(hex_str)
+            .ok()
+            .and_then(|bytes| {
+                if bytes.len() == 4 {
+                    let mut arr = [0u8; 4];
+                    arr.copy_from_slice(&bytes);
+                    Some(arr)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| *func.selector())
+    } else {
+        *func.selector()
+    };
+
+    let inputs: Vec<ABIParam> = func.inputs.iter().map(convert_param).collect();
+    let outputs: Vec<ABIParam> = func.outputs.iter().map(convert_param).collect();
+    let input_types = inputs.iter().map(|p| p.type_.clone()).collect();
+    let output_types = outputs.iter().map(|p| p.type_.clone()).collect();
+
     ABIFunction {
         name: func.name.clone(),
-        inputs: func.inputs.iter().map(convert_param).collect(),
-        outputs: func.outputs.iter().map(convert_param).collect(),
+        inputs,
+        outputs,
+        input_types,
+        output_types,
         state_mutability: state_mutability_to_string(func.state_mutability),
         constant: matches!(func.state_mutability, StateMutability::Pure | StateMutability::View),
         payable: matches!(func.state_mutability, StateMutability::Payable),
-        selector: *func.selector(),
+        selector,
         signature,
     }
 }
@@ -654,7 +699,6 @@ fn decompile_code(py: Python<'_>, code: String, skip_resolving: bool, extract_st
         .build()
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to build args: {}", e)))?;
 
-    // Run decompilation with panic catching using the global runtime
     let (decompile_result, decompile_error) = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         TOKIO_RUNTIME.block_on(async move {
             decompile(args).await
@@ -714,10 +758,15 @@ fn decompile_code(py: Python<'_>, code: String, skip_resolving: bool, extract_st
                     .map(|p| p.ty.as_str())
                     .collect::<Vec<_>>()
                     .join(","));
+            let inputs: Vec<ABIParam> = c.inputs.iter().map(convert_param).collect();
+            let input_types = inputs.iter().map(|p| p.type_.clone()).collect();
+
             ABIFunction {
                 name: "constructor".to_string(),
-                inputs: c.inputs.iter().map(convert_param).collect(),
+                inputs,
                 outputs: Vec::new(),
+                input_types,
+                output_types: Vec::new(),
                 state_mutability: state_mutability_to_string(c.state_mutability),
                 constant: false,
                 payable: matches!(c.state_mutability, StateMutability::Payable),
@@ -730,6 +779,8 @@ fn decompile_code(py: Python<'_>, code: String, skip_resolving: bool, extract_st
             name: "fallback".to_string(),
             inputs: Vec::new(),
             outputs: Vec::new(),
+            input_types: Vec::new(),
+            output_types: Vec::new(),
             state_mutability: state_mutability_to_string(f.state_mutability),
             constant: false,
             payable: matches!(f.state_mutability, StateMutability::Payable),
@@ -741,6 +792,8 @@ fn decompile_code(py: Python<'_>, code: String, skip_resolving: bool, extract_st
             name: "receive".to_string(),
             inputs: Vec::new(),
             outputs: Vec::new(),
+            input_types: Vec::new(),
+            output_types: Vec::new(),
             state_mutability: "payable".to_string(),
             constant: false,
             payable: true,
@@ -985,6 +1038,11 @@ fn get_cache_stats(py: Python<'_>) -> PyResult<PyObject> {
 
 #[pymodule]
 fn heimdall_py(_py: Python, m: &PyModule) -> PyResult<()> {
+    // Initialize tracing if RUST_LOG is set
+    if std::env::var("RUST_LOG").is_ok() {
+        tracing_subscriber::fmt::init();
+    }
+
     m.add_class::<ABIParam>()?;
     m.add_class::<ABIFunction>()?;
     m.add_class::<ABIEventParam>()?;

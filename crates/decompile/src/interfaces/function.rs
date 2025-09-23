@@ -69,6 +69,9 @@ pub(crate) struct CalldataFrame {
     pub arg_op: String,
     pub mask_size: usize,
     pub heuristics: HashSet<TypeHeuristic>,
+    /// Whether this argument is actually used in function logic
+    /// (vs just being loaded for validation/bounds checking)
+    pub confirmed_used: bool,
 }
 
 impl CalldataFrame {
@@ -133,9 +136,14 @@ impl AnalyzedFunction {
         memory_slice
     }
 
-    /// Get the arguments in a sorted vec
+    /// Get the arguments in a sorted vec, filtering out phantom arguments
     pub(crate) fn sorted_arguments(&self) -> Vec<(usize, CalldataFrame)> {
-        let mut arguments: Vec<_> = self.arguments.clone().into_iter().collect();
+        let mut arguments: Vec<_> = self.arguments
+            .clone()
+            .into_iter()
+            // Keep first argument always, filter others based on usage
+            .filter(|(idx, frame)| *idx == 0 || frame.confirmed_used)
+            .collect();
         arguments.sort_by(|x, y| x.0.cmp(&y.0));
         arguments
     }

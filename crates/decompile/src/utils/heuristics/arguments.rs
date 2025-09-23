@@ -24,11 +24,11 @@ fn contains_push20(operation: &WrappedOpcode, depth: u32) -> bool {
     if depth > 16 {
         return false;
     }
-    
+
     if operation.opcode == 0x73 {
         return true;
     }
-    
+
     // Recursively check all inputs
     for input in &operation.inputs {
         if let WrappedInput::Opcode(wrapped_op) = input {
@@ -37,8 +37,25 @@ fn contains_push20(operation: &WrappedOpcode, depth: u32) -> bool {
             }
         }
     }
-    
+
     false
+}
+
+fn find_calldataload_in_operation(operation: &WrappedOpcode) -> Option<&WrappedOpcode> {
+    if operation.opcode == CALLDATALOAD {
+        return Some(operation);
+    }
+
+    // Recursively check inputs
+    for input in &operation.inputs {
+        if let WrappedInput::Opcode(wrapped_op) = input {
+            if let Some(found) = find_calldataload_in_operation(wrapped_op) {
+                return Some(found);
+            }
+        }
+    }
+
+    None
 }
 
 pub(crate) fn argument_heuristic<'a>(
@@ -55,15 +72,18 @@ pub(crate) fn argument_heuristic<'a>(
                 .try_into()
                 .unwrap_or(usize::MAX);
 
+                // Store potential argument but mark as unconfirmed
                 function.arguments.entry(arg_index).or_insert_with(|| {
                     debug!(
-                        "discovered new argument at index {} from CALLDATALOAD({})",
-                        arg_index, state.last_instruction.inputs[0]
+                        "[selector: {}] discovered potential argument at index {} from CALLDATALOAD({}) with input_op: {}",
+                        function.selector, arg_index, state.last_instruction.inputs[0],
+                        state.last_instruction.input_operations[0].to_string()
                     );
                     CalldataFrame {
                         arg_op: state.last_instruction.input_operations[0].to_string(),
-                        mask_size: 32, // init to 32 because all CALLDATALOADs are 32 bytes
+                        mask_size: 32,
                         heuristics: HashSet::new(),
+                        confirmed_used: false,
                     }
                 });
             }
@@ -98,6 +118,7 @@ pub(crate) fn argument_heuristic<'a>(
                         );
 
                         frame.mask_size = mask_size_bytes;
+                        frame.confirmed_used = true;
                     }
                 }
             }
@@ -107,7 +128,7 @@ pub(crate) fn argument_heuristic<'a>(
                 if !function.logic.contains(&"__HAS_RETURN__".to_string()) {
                     function.logic.push("__HAS_RETURN__".to_string());
                 }
-                
+
                 let size: usize = state.last_instruction.inputs[1].try_into().unwrap_or(0);
                 
 
@@ -165,20 +186,69 @@ pub(crate) fn argument_heuristic<'a>(
                 }) {
                     function.returns = Some(String::from("uint256"));
                 }
-                else if size > 32 {
-                    function.returns = Some(String::from("bytes memory"));
-                } else {
+                else {
+                        debug!("Function {} analyzing return type for size={} bytes", function.selector, size);
+                        debug!("  Return operations: {}", return_memory_operations_solidified);
+
+                        // Check if this looks like a dynamic string/bytes return
+                        // Dynamic types have offset pointer at 0x20
+                        let has_dynamic_pattern =
+                            return_memory_operations_solidified.contains("memory[0x40") ||
+                            return_memory_operations_solidified.contains("abi.encode") ||
+                            (size >= 32 && return_memory_operations_solidified.contains("0x40"));
+
+                        // CRITICAL FIX: Check if the return is actually returning a pointer to dynamic data
+                        // This happens when we return memory[0x40] which contains 0x20 (the offset)
+                        // OR if we see common string patterns in the operations
+                        let returns_dynamic_pointer = return_memory_operations.iter().any(|frame| {
+                            // Check if the value is 0x20 (32), which is the standard ABI offset for dynamic data
+                            frame.value == U256::from(0x20)
+                        }) || (
+                            // Also check if the operations show dynamic memory patterns
+                            return_memory_operations_solidified.contains("memory[0x40]") ||
+                            return_memory_operations_solidified.contains("0x20")
+                        );
+
+                        debug!("  has_dynamic_pattern={}, returns_dynamic_pointer={}", has_dynamic_pattern, returns_dynamic_pointer);
+
+                        // Analyze the actual memory pattern for string vs bytes detection
+                        // Strings typically have readable ASCII patterns
+                        let _looks_like_string = (has_dynamic_pattern || returns_dynamic_pointer) && return_memory_operations.iter().any(|frame| {
+                            let bytes = frame.value.to_be_bytes_vec();
+                            // Check if the bytes contain ASCII printable characters
+                            let ascii_count = bytes.iter().filter(|&&b| b >= 0x20 && b <= 0x7E).count();
+                            let result = ascii_count > bytes.len() / 2;  // More than half are printable ASCII
+                            debug!("    Frame value check: ascii_count={}, total_bytes={}, is_string_like={}", ascii_count, bytes.len(), result);
+                            result
+                        });
+
+                        // Check for bytes32 pattern: fixed 32-byte value with high entropy
+                        let is_likely_bytes32 = !has_dynamic_pattern &&
+                            function.arguments.is_empty() &&
+                            return_memory_operations.iter().any(|frame| {
+                                let bytes = frame.value.to_be_bytes_vec();
+                                let non_zero_bytes = bytes.iter().filter(|&&b| b != 0).count();
+                                // bytes32 constants typically have many non-zero bytes spread throughout
+                                // unlike addresses which have leading zeros
+                                non_zero_bytes > 20 && {
+                                    // Check for even distribution (not just at the end like addresses)
+                                    let first_half_non_zero = bytes[0..16].iter().filter(|&&b| b != 0).count();
+                                    let second_half_non_zero = bytes[16..32].iter().filter(|&&b| b != 0).count();
+                                    first_half_non_zero > 5 && second_half_non_zero > 5
+                                }
+                            });
+
                         let has_push20 = return_memory_operations.iter().any(|frame| {
                             debug!("Checking memory operation for PUSH20: opcode={:02x}", frame.operation.opcode);
                             contains_push20(&frame.operation, 0)
                         });
-                        
+
                         let has_address_value = if function.arguments.is_empty() {
                             return_memory_operations.iter().any(|frame| {
                                 let bytes = frame.value.to_be_bytes_vec();
                                 let leading_zeros = bytes.iter().take_while(|&&b| b == 0).count();
                                 let non_zero_bytes = bytes.iter().filter(|&&b| b != 0).count();
-                                
+
                                 leading_zeros == 12 && non_zero_bytes >= 10 && non_zero_bytes <= 20
                             })
                         } else {
@@ -189,15 +259,25 @@ pub(crate) fn argument_heuristic<'a>(
                                 leading_zeros >= 12 && non_zero_bytes <= 20 && non_zero_bytes > 0
                             })
                         };
-                        
-                        
+
+
                         if has_push20 || has_address_value {
                             debug!("Found address pattern in return memory operations - setting return type to address");
                             function.returns = Some(String::from("address"));
+                        } else if returns_dynamic_pointer || has_dynamic_pattern || size > 32 {
+                            // If we're returning 0x20 (the ABI offset), have dynamic patterns, or size > 32
+                            // Since string and bytes are indistinguishable at bytecode level,
+                            // we ALWAYS default to string (not bytes) for dynamic data
+                            debug!("Dynamic data detected (pointer={}, pattern={}, size={}) - defaulting to string",
+                                   returns_dynamic_pointer, has_dynamic_pattern, size);
+                            function.returns = Some(String::from("string"));
+                        } else if is_likely_bytes32 {
+                            debug!("Memory pattern suggests bytes32");
+                            function.returns = Some(String::from("bytes32"));
                         } else {
                             let mut byte_size = 32;
                             let mut found_mask = false;
-                            
+
                             if let Some(bitmask) = AND_BITMASK_REGEX
                             .find(&return_memory_operations_solidified)
                             .ok()
@@ -217,7 +297,7 @@ pub(crate) fn argument_heuristic<'a>(
                         }
 
                         let (_, cast_types) = byte_size_to_type(byte_size);
-                        
+
                         let return_type = if function.arguments.is_empty() && byte_size == 1 {
                             String::from("uint8")
                         } else if byte_size == 20 {
@@ -227,10 +307,13 @@ pub(crate) fn argument_heuristic<'a>(
                                 String::from("address")
                             }
                             else if found_mask && byte_size == 32 &&
-                                    return_memory_operations_solidified.contains("& (0x") && 
+                                    return_memory_operations_solidified.contains("& (0x") &&
                                     return_memory_operations_solidified.contains("ff") &&
                                     return_memory_operations_solidified.matches("ff").count() == 20 {
                                 String::from("address")
+                            }
+                            else if is_likely_bytes32 {
+                                String::from("bytes32")
                             }
                             else {
                                 cast_types[0].to_string()
@@ -238,7 +321,7 @@ pub(crate) fn argument_heuristic<'a>(
                         } else {
                             cast_types[0].to_string()
                         };
-                        
+
                         function.returns = Some(return_type);
                     }
                 }
@@ -283,6 +366,7 @@ pub(crate) fn argument_heuristic<'a>(
                     );
 
                     frame.heuristics.insert(TypeHeuristic::Numeric);
+                    frame.confirmed_used = true;
                 }
             }
 
@@ -305,6 +389,7 @@ pub(crate) fn argument_heuristic<'a>(
                     );
 
                     frame.heuristics.insert(TypeHeuristic::Bytes);
+                    frame.confirmed_used = true;
                 }
             }
 
@@ -332,6 +417,45 @@ pub(crate) fn argument_heuristic<'a>(
                         );
 
                         frame.heuristics.insert(TypeHeuristic::Boolean);
+                        frame.confirmed_used = true;
+                    }
+                }
+            }
+
+            // SSTORE - storage operations definitely use their inputs
+            0x55 => {
+                // Check if any CALLDATALOAD value is used in SSTORE
+                for input_op in &state.last_instruction.input_operations {
+                    if let Some(calldataload_op) = find_calldataload_in_operation(input_op) {
+                        let arg_op = calldataload_op.inputs[0].to_string();
+                        if let Some((arg_index, frame)) =
+                            function.arguments.iter_mut().find(|(_, frame)| frame.arg_op == arg_op)
+                        {
+                            debug!(
+                                "[selector: {}] argument {} used in SSTORE",
+                                function.selector, arg_index
+                            );
+                            frame.confirmed_used = true;
+                        }
+                    }
+                }
+            }
+
+            // EQ - equality comparison uses its inputs
+            0x14 => {
+                // Check if any CALLDATALOAD value is used in EQ
+                for input_op in &state.last_instruction.input_operations {
+                    if let Some(calldataload_op) = find_calldataload_in_operation(input_op) {
+                        let arg_op = calldataload_op.inputs[0].to_string();
+                        if let Some((arg_index, frame)) =
+                            function.arguments.iter_mut().find(|(_, frame)| frame.arg_op == arg_op)
+                        {
+                            debug!(
+                                "[selector: {}] argument {} used in EQ comparison",
+                                function.selector, arg_index
+                            );
+                            frame.confirmed_used = true;
+                        }
                     }
                 }
             }

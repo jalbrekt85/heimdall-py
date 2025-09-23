@@ -3,10 +3,10 @@ use lmdb::{Database, Environment, EnvironmentFlags, Transaction, WriteFlags};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 
 lazy_static::lazy_static! {
-    static ref CACHE: Mutex<Option<AbiCache>> = Mutex::new(None);
+    static ref CACHE: RwLock<Option<Arc<AbiCache>>> = RwLock::new(None);
     static ref CACHE_STATS: Mutex<CacheStats> = Mutex::new(CacheStats::default());
 }
 
@@ -18,8 +18,9 @@ pub struct CacheStats {
     pub errors: u64,
 }
 
+#[derive(Clone)]
 pub struct AbiCache {
-    env: Environment,
+    env: Arc<Environment>,
     db: Database,
     enabled: bool,
 }
@@ -27,14 +28,14 @@ pub struct AbiCache {
 impl AbiCache {
     pub fn init(directory: Option<PathBuf>, enabled: bool) -> Result<(), String> {
         {
-            let cache = CACHE.lock().unwrap();
+            let cache = CACHE.read().unwrap();
             if cache.is_some() {
                 return Ok(());
             }
         }
 
         if !enabled {
-            let mut cache = CACHE.lock().unwrap();
+            let mut cache = CACHE.write().unwrap();
             *cache = None;
             return Ok(());
         }
@@ -48,7 +49,7 @@ impl AbiCache {
 
         let env = Environment::new()
             .set_flags(EnvironmentFlags::NO_SUB_DIR)
-            .set_map_size(10 * 1024 * 1024 * 1024)
+            .set_map_size(1024 * 1024 * 1024 * 1024)  // 1TB map size - just virtual address space
             .set_max_readers(8192)
             .set_max_dbs(1)
             .open(&cache_path)
@@ -57,10 +58,14 @@ impl AbiCache {
         let db = env.open_db(None)
             .map_err(|e| format!("Failed to open database: {}", e))?;
 
-        let cache_instance = AbiCache { env, db, enabled };
+        let cache_instance = AbiCache {
+            env: Arc::new(env),
+            db,
+            enabled
+        };
 
-        let mut cache = CACHE.lock().unwrap();
-        *cache = Some(cache_instance);
+        let mut cache = CACHE.write().unwrap();
+        *cache = Some(Arc::new(cache_instance));
 
         Ok(())
     }
@@ -76,17 +81,19 @@ impl AbiCache {
     }
 
     pub fn get(bytecode: &str, skip_resolving: bool) -> Option<Vec<u8>> {
-        let cache_guard = CACHE.lock().unwrap();
-        let cache = cache_guard.as_ref()?;
+        let cache_handle = {
+            let cache_guard = CACHE.read().unwrap();
+            cache_guard.as_ref()?.clone()
+        };
 
-        if !cache.enabled {
+        if !cache_handle.enabled {
             return None;
         }
 
         let key = Self::generate_cache_key(bytecode, skip_resolving);
 
-        let txn = cache.env.begin_ro_txn().ok()?;
-        let result = txn.get(cache.db, &key).ok().map(|data| data.to_vec());
+        let txn = cache_handle.env.begin_ro_txn().ok()?;
+        let result = txn.get(cache_handle.db, &key).ok().map(|data| data.to_vec());
 
         let mut stats = CACHE_STATS.lock().unwrap();
         if result.is_some() {
@@ -99,20 +106,23 @@ impl AbiCache {
     }
 
     pub fn put(bytecode: &str, skip_resolving: bool, abi_data: &[u8]) -> Result<(), String> {
-        let cache_guard = CACHE.lock().unwrap();
-        let cache = cache_guard.as_ref()
-            .ok_or_else(|| "Cache not initialized".to_string())?;
+        let cache_handle = {
+            let cache_guard = CACHE.read().unwrap();
+            cache_guard.as_ref()
+                .ok_or_else(|| "Cache not initialized".to_string())?
+                .clone()
+        };
 
-        if !cache.enabled {
+        if !cache_handle.enabled {
             return Ok(());
         }
 
         let key = Self::generate_cache_key(bytecode, skip_resolving);
 
-        let mut txn = cache.env.begin_rw_txn()
+        let mut txn = cache_handle.env.begin_rw_txn()
             .map_err(|e| format!("Failed to begin write transaction: {}", e))?;
 
-        txn.put(cache.db, &key, &abi_data, WriteFlags::empty())
+        txn.put(cache_handle.db, &key, &abi_data, WriteFlags::empty())
             .map_err(|e| format!("Failed to write to cache: {}", e))?;
 
         txn.commit()
@@ -125,14 +135,17 @@ impl AbiCache {
     }
 
     pub fn clear() -> Result<(), String> {
-        let cache_guard = CACHE.lock().unwrap();
-        let cache = cache_guard.as_ref()
-            .ok_or_else(|| "Cache not initialized".to_string())?;
+        let cache_handle = {
+            let cache_guard = CACHE.read().unwrap();
+            cache_guard.as_ref()
+                .ok_or_else(|| "Cache not initialized".to_string())?
+                .clone()
+        };
 
-        let mut txn = cache.env.begin_rw_txn()
+        let mut txn = cache_handle.env.begin_rw_txn()
             .map_err(|e| format!("Failed to begin write transaction: {}", e))?;
 
-        txn.clear_db(cache.db)
+        txn.clear_db(cache_handle.db)
             .map_err(|e| format!("Failed to clear cache: {}", e))?;
 
         txn.commit()
@@ -149,7 +162,7 @@ impl AbiCache {
     }
 
     pub fn is_enabled() -> bool {
-        let cache_guard = CACHE.lock().unwrap();
+        let cache_guard = CACHE.read().unwrap();
         cache_guard.as_ref().map(|c| c.enabled).unwrap_or(false)
     }
 }

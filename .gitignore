@@ -41,3 +41,16 @@ node_modules
 testing.md
 
 crates/python/parquets
+
+crates/python/*.md
+crates/decompile/*.md
+test_type_baseline.json
+*/reference/
+.gitmodules
+*/.gitmodules
+
+# User home directory artifacts
+~/
+
+# Claude hooks directory (if it exists locally)
+.claude/hooks/

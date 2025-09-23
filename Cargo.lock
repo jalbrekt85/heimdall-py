@@ -2430,6 +2430,8 @@ dependencies = [
  "storage_layout_extractor",
  "tiny-keccak",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

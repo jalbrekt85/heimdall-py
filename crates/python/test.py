@@ -37,12 +37,12 @@ def test_univ2pair_comprehensive():
     errors = []
     abi = decompile_code(univ2pair, skip_resolving=False)
     
-    totalSupply = next((func for func in abi.functions if func.name == "totalSupply"), None)
-    transfer = next((func for func in abi.functions if func.name == "transfer"), None)
-    balanceOf = next((func for func in abi.functions if func.name == "balanceOf"), None)
-    approve = next((func for func in abi.functions if func.name == "approve"), None)
-    transferFrom = next((func for func in abi.functions if func.name == "transferFrom"), None)
-    allowance = next((func for func in abi.functions if func.name == "allowance"), None)
+    totalSupply = abi.get_function("totalSupply")
+    transfer = abi.get_function("transfer")
+    balanceOf = abi.get_function("balanceOf")
+    approve = abi.get_function("approve")
+    transferFrom = abi.get_function("transferFrom")
+    allowance = abi.get_function("allowance")
     
     check(totalSupply is not None, "totalSupply function found", errors)
     if totalSupply:
@@ -79,19 +79,19 @@ def test_univ2pair_comprehensive():
         check([o.type_ for o in allowance.outputs] == ["uint256"], f"allowance returns uint256 (got {[o.type_ for o in allowance.outputs]})", errors)
     
     # UniV2Pair specific functions
-    token0 = next((func for func in abi.functions if func.name == "token0"), None)
+    token0 = abi.get_function("token0")
     check(token0 is not None, "token0 function found", errors)
     if token0:
         check(token0.inputs == [], f"token0 has no inputs", errors)
         check([o.type_ for o in token0.outputs] == ["address"], f"token0 returns address (got {[o.type_ for o in token0.outputs]})", errors)
     
-    token1 = next((func for func in abi.functions if func.name == "token1"), None)
+    token1 = abi.get_function("token1")
     check(token1 is not None, "token1 function found", errors)
     if token1:
         check(token1.inputs == [], f"token1 has no inputs", errors)
         check([o.type_ for o in token1.outputs] == ["address"], f"token1 returns address (got {[o.type_ for o in token1.outputs]})", errors)
     
-    getReserves = next((func for func in abi.functions if func.name == "getReserves"), None)
+    getReserves = abi.get_function("getReserves")
     check(getReserves is not None, "getReserves function found", errors)
     if getReserves:
         check(getReserves.inputs == [], f"getReserves has no inputs", errors)
@@ -100,14 +100,14 @@ def test_univ2pair_comprehensive():
         if getReserves.outputs:
             check(all(o.type_.startswith("uint") for o in getReserves.outputs), f"getReserves returns uint types (got {[o.type_ for o in getReserves.outputs]})", errors)
     
-    kLast = next((func for func in abi.functions if func.name == "kLast"), None)
+    kLast = abi.get_function("kLast")
     check(kLast is not None, "kLast function found", errors)
     if kLast:
         check(kLast.inputs == [], f"kLast has no inputs", errors)
         check([o.type_ for o in kLast.outputs] == ["uint256"], f"kLast returns uint256 (got {[o.type_ for o in kLast.outputs]})", errors)
     
     # Test mint and burn functions
-    mint = next((func for func in abi.functions if func.name == "mint"), None)
+    mint = abi.get_function("mint")
     check(mint is not None, "mint function found", errors)
     if mint:
         check(len(mint.inputs) == 1, f"mint has 1 input", errors)
@@ -115,33 +115,33 @@ def test_univ2pair_comprehensive():
         if mint.outputs and len(mint.outputs) > 0:
             check(mint.outputs[0].type_.startswith("uint"), f"mint returns uint (got {mint.outputs[0].type_})", errors)
     
-    burn = next((func for func in abi.functions if func.name == "burn"), None)
+    burn = abi.get_function("burn")
     check(burn is not None, "burn function found", errors)
     if burn:
         check(len(burn.inputs) == 1, f"burn has 1 input", errors)
         check(burn.inputs[0].type_ == "address", f"burn param is address (got {burn.inputs[0].type_})", errors)
     
     # Test skim and sync functions
-    skim = next((func for func in abi.functions if func.name == "skim"), None)
+    skim = abi.get_function("skim")
     check(skim is not None, "skim function found", errors)
     if skim:
         check(len(skim.inputs) == 1, f"skim has 1 input", errors)
         check(skim.inputs[0].type_ == "address", f"skim param is address (got {skim.inputs[0].type_})", errors)
     
-    sync = next((func for func in abi.functions if func.name == "sync"), None)
+    sync = abi.get_function("sync")
     check(sync is not None, "sync function found", errors)
     if sync:
         check(sync.inputs == [], f"sync has no inputs", errors)
     
     # Test permit function
-    permit = next((func for func in abi.functions if func.name == "permit"), None)
+    permit = abi.get_function("permit")
     check(permit is not None, "permit function found", errors)
     if permit:
         check(len(permit.inputs) == 7, f"permit has 7 inputs (got {len(permit.inputs)})", errors)
         expected = ["address", "address", "uint256", "uint256", "uint8", "bytes32", "bytes32"]
         check([i.type_ for i in permit.inputs] == expected, f"permit params match ABI", errors)
     
-    PERMIT_TYPEHASH = next((func for func in abi.functions if func.name == "PERMIT_TYPEHASH"), None)
+    PERMIT_TYPEHASH = abi.get_function("PERMIT_TYPEHASH")
     check(PERMIT_TYPEHASH is not None, "PERMIT_TYPEHASH function found", errors)
     if PERMIT_TYPEHASH:
         check(PERMIT_TYPEHASH.inputs == [], f"PERMIT_TYPEHASH has no inputs", errors)
@@ -166,7 +166,7 @@ def test_univ2pair_comprehensive():
         check(swap.outputs is None or len(swap.outputs) == 0, f"swap has no outputs", errors)
     
     # Test for DOMAIN_SEPARATOR  
-    DOMAIN_SEPARATOR = next((func for func in abi.functions if func.name == "DOMAIN_SEPARATOR"), None)
+    DOMAIN_SEPARATOR = abi.get_function("DOMAIN_SEPARATOR")
     check(DOMAIN_SEPARATOR is not None, "DOMAIN_SEPARATOR function found", errors)
     if DOMAIN_SEPARATOR:
         check(DOMAIN_SEPARATOR.inputs == [], f"DOMAIN_SEPARATOR has no inputs", errors)
@@ -175,7 +175,7 @@ def test_univ2pair_comprehensive():
                   f"DOMAIN_SEPARATOR returns bytes32 (got {[o.type_ for o in DOMAIN_SEPARATOR.outputs]})", errors)
     
     # Test name and symbol
-    name = next((func for func in abi.functions if func.name == "name"), None)
+    name = abi.get_function("name")
     check(name is not None, "name function found", errors)
     if name:
         check(name.inputs == [], f"name has no inputs", errors)
@@ -183,7 +183,7 @@ def test_univ2pair_comprehensive():
         if name.outputs:
             check(name.outputs[0].type_ == "string", f"name returns string (got {name.outputs[0].type_})", errors)
     
-    symbol = next((func for func in abi.functions if func.name == "symbol"), None)
+    symbol = abi.get_function("symbol")
     check(symbol is not None, "symbol function found", errors)
     if symbol:
         check(symbol.inputs == [], f"symbol has no inputs", errors)
@@ -191,7 +191,7 @@ def test_univ2pair_comprehensive():
         if symbol.outputs:
             check(symbol.outputs[0].type_ == "string", f"symbol returns string (got {symbol.outputs[0].type_})", errors)
     
-    decimals = next((func for func in abi.functions if func.name == "decimals"), None)
+    decimals = abi.get_function("decimals")
     check(decimals is not None, "decimals function found", errors)
     if decimals:
         check(decimals.inputs == [], f"decimals has no inputs", errors)
@@ -262,14 +262,14 @@ def test_weth_comprehensive():
     abi = decompile_code(weth, skip_resolving=False)
     
     # Test basic ERC20 functions
-    deposit = next((func for func in abi.functions if func.name == "deposit"), None)
-    withdraw = next((func for func in abi.functions if func.name == "withdraw"), None)
-    totalSupply = next((func for func in abi.functions if func.name == "totalSupply"), None)
-    transfer = next((func for func in abi.functions if func.name == "transfer"), None)
-    balanceOf = next((func for func in abi.functions if func.name == "balanceOf"), None)
-    approve = next((func for func in abi.functions if func.name == "approve"), None)
-    transferFrom = next((func for func in abi.functions if func.name == "transferFrom"), None)
-    allowance = next((func for func in abi.functions if func.name == "allowance"), None)
+    deposit = abi.get_function("deposit")
+    withdraw = abi.get_function("withdraw")
+    totalSupply = abi.get_function("totalSupply")
+    transfer = abi.get_function("transfer")
+    balanceOf = abi.get_function("balanceOf")
+    approve = abi.get_function("approve")
+    transferFrom = abi.get_function("transferFrom")
+    allowance = abi.get_function("allowance")
     
     check(deposit is not None, "deposit function found", errors)
     if deposit:
@@ -314,7 +314,7 @@ def test_weth_comprehensive():
         check([o.type_ for o in allowance.outputs] == ["uint256"], f"allowance returns uint256 (got {[o.type_ for o in allowance.outputs]})", errors)
     
     # Test metadata functions
-    name = next((func for func in abi.functions if func.name == "name"), None)
+    name = abi.get_function("name")
     check(name is not None, "name function found", errors)
     if name:
         check(name.inputs == [], f"name has no inputs", errors)
@@ -322,7 +322,7 @@ def test_weth_comprehensive():
         if name.outputs:
             check(name.outputs[0].type_ == "string", f"name returns string (got {name.outputs[0].type_})", errors)
     
-    symbol = next((func for func in abi.functions if func.name == "symbol"), None)
+    symbol = abi.get_function("symbol")
     check(symbol is not None, "symbol function found", errors)
     if symbol:
         check(symbol.inputs == [], f"symbol has no inputs", errors)
@@ -330,7 +330,7 @@ def test_weth_comprehensive():
         if symbol.outputs:
             check(symbol.outputs[0].type_ == "string", f"symbol returns string (got {symbol.outputs[0].type_})", errors)
     
-    decimals = next((func for func in abi.functions if func.name == "decimals"), None)
+    decimals = abi.get_function("decimals")
     check(decimals is not None, "decimals function found", errors)
     if decimals:
         check(decimals.inputs == [], f"decimals has no inputs", errors)
@@ -349,12 +349,12 @@ def test_erc20_comprehensive():
     abi = decompile_code(erc20, skip_resolving=False)
     
     # Test standard ERC20 functions
-    totalSupply = next((func for func in abi.functions if func.name == "totalSupply"), None)
-    transfer = next((func for func in abi.functions if func.name == "transfer"), None)
-    balanceOf = next((func for func in abi.functions if func.name == "balanceOf"), None)
-    approve = next((func for func in abi.functions if func.name == "approve"), None)
-    transferFrom = next((func for func in abi.functions if func.name == "transferFrom"), None)
-    allowance = next((func for func in abi.functions if func.name == "allowance"), None)
+    totalSupply = abi.get_function("totalSupply")
+    transfer = abi.get_function("transfer")
+    balanceOf = abi.get_function("balanceOf")
+    approve = abi.get_function("approve")
+    transferFrom = abi.get_function("transferFrom")
+    allowance = abi.get_function("allowance")
     
     check(totalSupply is not None, "totalSupply function found", errors)
     if totalSupply:
@@ -390,7 +390,7 @@ def test_erc20_comprehensive():
         check([o.type_ for o in allowance.outputs] == ["uint256"], f"allowance returns uint256 (got {[o.type_ for o in allowance.outputs]})", errors)
     
     # Test Dai-specific functions
-    wards = next((func for func in abi.functions if func.name == "wards"), None)
+    wards = abi.get_function("wards")
     check(wards is not None, "wards function found", errors)
     if wards:
         check(len(wards.inputs) == 1, f"wards has 1 input", errors)
@@ -399,21 +399,21 @@ def test_erc20_comprehensive():
         if wards.outputs:
             check(wards.outputs[0].type_.startswith("uint"), f"wards returns uint (got {wards.outputs[0].type_})", errors)
     
-    rely = next((func for func in abi.functions if func.name == "rely"), None)
+    rely = abi.get_function("rely")
     check(rely is not None, "rely function found", errors)
     if rely:
         check(len(rely.inputs) == 1, f"rely has 1 input", errors)
         if rely.inputs:
             check(rely.inputs[0].type_ == "address", f"rely param is address (got {rely.inputs[0].type_})", errors)
     
-    deny = next((func for func in abi.functions if func.name == "deny"), None)
+    deny = abi.get_function("deny")
     check(deny is not None, "deny function found", errors)
     if deny:
         check(len(deny.inputs) == 1, f"deny has 1 input", errors)
         if deny.inputs:
             check(deny.inputs[0].type_ == "address", f"deny param is address (got {deny.inputs[0].type_})", errors)
     
-    mint = next((func for func in abi.functions if func.name == "mint"), None)
+    mint = abi.get_function("mint")
     check(mint is not None, "mint function found", errors)
     if mint:
         check(len(mint.inputs) == 2, f"mint has 2 inputs", errors)
@@ -421,7 +421,7 @@ def test_erc20_comprehensive():
             check(mint.inputs[0].type_ == "address", f"mint param 0 is address (got {mint.inputs[0].type_})", errors)
             check(mint.inputs[1].type_.startswith("uint"), f"mint param 1 is uint (got {mint.inputs[1].type_})", errors)
     
-    burn = next((func for func in abi.functions if func.name == "burn"), None)
+    burn = abi.get_function("burn")
     check(burn is not None, "burn function found", errors)
     if burn:
         check(len(burn.inputs) == 2, f"burn has 2 inputs", errors)
@@ -429,7 +429,7 @@ def test_erc20_comprehensive():
             check(burn.inputs[0].type_ == "address", f"burn param 0 is address (got {burn.inputs[0].type_})", errors)
             check(burn.inputs[1].type_.startswith("uint"), f"burn param 1 is uint (got {burn.inputs[1].type_})", errors)
     
-    push = next((func for func in abi.functions if func.name == "push"), None)
+    push = abi.get_function("push")
     check(push is not None, "push function found", errors)
     if push:
         check(len(push.inputs) == 2, f"push has 2 inputs", errors)
@@ -437,7 +437,7 @@ def test_erc20_comprehensive():
             check(push.inputs[0].type_ == "address", f"push param 0 is address (got {push.inputs[0].type_})", errors)
             check(push.inputs[1].type_.startswith("uint"), f"push param 1 is uint (got {push.inputs[1].type_})", errors)
     
-    pull = next((func for func in abi.functions if func.name == "pull"), None)
+    pull = abi.get_function("pull")
     check(pull is not None, "pull function found", errors)
     if pull:
         check(len(pull.inputs) == 2, f"pull has 2 inputs", errors)
@@ -445,7 +445,7 @@ def test_erc20_comprehensive():
             check(pull.inputs[0].type_ == "address", f"pull param 0 is address (got {pull.inputs[0].type_})", errors)
             check(pull.inputs[1].type_.startswith("uint"), f"pull param 1 is uint (got {pull.inputs[1].type_})", errors)
     
-    move = next((func for func in abi.functions if func.name == "move"), None)
+    move = abi.get_function("move")
     check(move is not None, "move function found", errors)
     if move:
         check(len(move.inputs) == 3, f"move has 3 inputs", errors)
@@ -454,12 +454,12 @@ def test_erc20_comprehensive():
             check(move.inputs[1].type_ == "address", f"move param 1 is address (got {move.inputs[1].type_})", errors)
             check(move.inputs[2].type_.startswith("uint"), f"move param 2 is uint (got {move.inputs[2].type_})", errors)
     
-    permit = next((func for func in abi.functions if func.name == "permit"), None)
+    permit = abi.get_function("permit")
     check(permit is not None, "permit function found", errors)
     if permit:
         check(len(permit.inputs) == 8, f"permit has 8 inputs (got {len(permit.inputs)})", errors)
     
-    nonces = next((func for func in abi.functions if func.name == "nonces"), None)
+    nonces = abi.get_function("nonces")
     check(nonces is not None, "nonces function found", errors)
     if nonces:
         check(len(nonces.inputs) == 1, f"nonces has 1 input", errors)
@@ -468,7 +468,7 @@ def test_erc20_comprehensive():
         if nonces.outputs:
             check(nonces.outputs[0].type_.startswith("uint"), f"nonces returns uint (got {nonces.outputs[0].type_})", errors)
     
-    DOMAIN_SEPARATOR = next((func for func in abi.functions if func.name == "DOMAIN_SEPARATOR"), None)
+    DOMAIN_SEPARATOR = abi.get_function("DOMAIN_SEPARATOR")
     check(DOMAIN_SEPARATOR is not None, "DOMAIN_SEPARATOR function found", errors)
     if DOMAIN_SEPARATOR:
         check(DOMAIN_SEPARATOR.inputs == [], f"DOMAIN_SEPARATOR has no inputs", errors)
@@ -476,7 +476,7 @@ def test_erc20_comprehensive():
             check(len(DOMAIN_SEPARATOR.outputs) == 1 and DOMAIN_SEPARATOR.outputs[0].type_ == "bytes32", 
                   f"DOMAIN_SEPARATOR returns bytes32 (got {DOMAIN_SEPARATOR.outputs[0].type_ if DOMAIN_SEPARATOR.outputs else 'None'})", errors)
     
-    PERMIT_TYPEHASH = next((func for func in abi.functions if func.name == "PERMIT_TYPEHASH"), None)
+    PERMIT_TYPEHASH = abi.get_function("PERMIT_TYPEHASH")
     check(PERMIT_TYPEHASH is not None, "PERMIT_TYPEHASH function found", errors)
     if PERMIT_TYPEHASH:
         check(PERMIT_TYPEHASH.inputs == [], f"PERMIT_TYPEHASH has no inputs", errors)
@@ -485,28 +485,28 @@ def test_erc20_comprehensive():
                   f"PERMIT_TYPEHASH returns bytes32 (got {PERMIT_TYPEHASH.outputs[0].type_ if PERMIT_TYPEHASH.outputs else 'None'})", errors)
     
     # Test metadata functions
-    name = next((func for func in abi.functions if func.name == "name"), None)
+    name = abi.get_function("name")
     check(name is not None, "name function found", errors)
     if name:
         check(name.inputs == [], f"name has no inputs", errors)
         if name.outputs:
             check(name.outputs[0].type_ == "string", f"name returns string (got {name.outputs[0].type_})", errors)
     
-    symbol = next((func for func in abi.functions if func.name == "symbol"), None)
+    symbol = abi.get_function("symbol")
     check(symbol is not None, "symbol function found", errors)
     if symbol:
         check(symbol.inputs == [], f"symbol has no inputs", errors)
         if symbol.outputs:
             check(symbol.outputs[0].type_ == "string", f"symbol returns string (got {symbol.outputs[0].type_})", errors)
     
-    version = next((func for func in abi.functions if func.name == "version"), None)
+    version = abi.get_function("version")
     check(version is not None, "version function found", errors)
     if version:
         check(version.inputs == [], f"version has no inputs", errors)
         if version.outputs:
             check(version.outputs[0].type_ == "string", f"version returns string (got {version.outputs[0].type_})", errors)
     
-    decimals = next((func for func in abi.functions if func.name == "decimals"), None)
+    decimals = abi.get_function("decimals")
     check(decimals is not None, "decimals function found", errors)
     if decimals:
         check(decimals.inputs == [], f"decimals has no inputs", errors)
@@ -598,13 +598,13 @@ def test_from_json():
     if transfer:
         check(transfer.name == "transfer", "Transfer function name is correct", errors)
         check(len(transfer.inputs) == 2, f"Transfer has 2 inputs (got {len(transfer.inputs)})", errors)
-        check(transfer.input_types == ["address", "uint256"], f"Transfer input types correct (got {transfer.input_types})", errors)
+        check([i.type_ for i in transfer.inputs] == ["address", "uint256"], f"Transfer input types correct (got {[i.type_ for i in transfer.inputs]})", errors)
 
     balanceOf = abi_erc20.get_function("balanceOf")
     check(balanceOf is not None, "Found balanceOf function", errors)
     if balanceOf:
         check(len(balanceOf.inputs) == 1, f"balanceOf has 1 input (got {len(balanceOf.inputs)})", errors)
-        check(balanceOf.input_types == ["address"], f"balanceOf input type correct (got {balanceOf.input_types})", errors)
+        check([i.type_ for i in balanceOf.inputs] == ["address"], f"balanceOf input type correct (got {[i.type_ for i in balanceOf.inputs]})", errors)
 
     # Test selector lookup
     if transfer:
@@ -666,15 +666,15 @@ def test_from_json():
         check(isinstance(transfer.selector, list), "Selector is a list", errors)
         check(len(transfer.selector) == 4, "Selector has 4 bytes", errors)
 
-        # Test signature method
-        sig = transfer.signature()
+        # Test signature property
+        sig = transfer.signature
         check(sig == "transfer(address,uint256)", f"Signature is correct (got {sig})", errors)
 
-        # Test input_types property
-        check(transfer.input_types == ["address", "uint256"], "input_types property works", errors)
+        # Test input types
+        check([i.type_ for i in transfer.inputs] == ["address", "uint256"], "input types correct", errors)
 
-        # Test output_types property
-        check(transfer.output_types == ["bool"], f"output_types property works (got {transfer.output_types})", errors)
+        # Test output types
+        check([o.type_ for o in transfer.outputs] == ["bool"], f"output types correct (got {[o.type_ for o in transfer.outputs]})", errors)
 
         # Test other properties
         check(hasattr(transfer, 'state_mutability'), "Has state_mutability", errors)
