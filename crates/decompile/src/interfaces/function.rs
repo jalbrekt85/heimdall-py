@@ -77,6 +77,10 @@ pub(crate) struct CalldataFrame {
 impl CalldataFrame {
     /// Get the potential types for the given argument
     pub(crate) fn potential_types(&self) -> Vec<String> {
+        if self.heuristics.contains(&TypeHeuristic::Bytes) {
+            return vec!["bytes".to_string()];
+        }
+
         // get all potential types that can fit in self.mask_size
         byte_size_to_type(self.mask_size).1.to_vec()
     }

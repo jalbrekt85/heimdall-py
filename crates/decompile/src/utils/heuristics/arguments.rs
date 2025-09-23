@@ -90,8 +90,27 @@ pub(crate) fn argument_heuristic<'a>(
 
             // CALLDATACOPY
             0x37 => {
-                // TODO: implement CALLDATACOPY support
-                trace!("CALLDATACOPY detected; not implemented");
+                // For functions with dynamic bytes parameters, this indicates the last parameter
+                // is likely bytes since dynamic data comes at the end
+
+                // The source offset tells us where in calldata we're reading from
+                let source_offset = state.last_instruction.inputs[1];
+
+                if source_offset >= U256::from(4) {
+                    // Find the highest index argument - this is most likely the dynamic parameter
+                    let max_idx = function.arguments.keys().max().copied();
+                    if let Some(max_idx) = max_idx {
+                        if let Some(frame) = function.arguments.get_mut(&max_idx) {
+                            frame.heuristics.insert(TypeHeuristic::Bytes);
+                            debug!(
+                                "[selector: {}] CALLDATACOPY detected - marking last argument {} as bytes",
+                                function.selector, max_idx
+                            );
+                        }
+                    }
+                }
+
+                trace!("CALLDATACOPY detected at offset {}", source_offset);
             }
 
             // AND | OR
@@ -296,9 +315,24 @@ pub(crate) fn argument_heuristic<'a>(
                             found_mask = true;
                         }
 
+                        // Check if the return value is always less than 256 (uint8 range)
+                        // Be more precise - only detect uint8 if we have explicit masking or small constant values
+                        let is_likely_uint8 = function.arguments.is_empty() && (
+                            // Explicit masking to 1 byte
+                            byte_size == 1 ||
+                            (found_mask && byte_size == 1) ||
+                            return_memory_operations_solidified.contains("& 0xff") ||
+                            return_memory_operations_solidified.contains("0xff &") ||
+                            // Constant value in typical decimals range (0-18)
+                            (return_memory_operations.len() == 1 &&
+                             return_memory_operations.iter().all(|frame|
+                                frame.value <= U256::from(18) && frame.value > U256::from(0)
+                             ))
+                        );
+
                         let (_, cast_types) = byte_size_to_type(byte_size);
 
-                        let return_type = if function.arguments.is_empty() && byte_size == 1 {
+                        let return_type = if is_likely_uint8 {
                             String::from("uint8")
                         } else if byte_size == 20 {
                             String::from("address")
