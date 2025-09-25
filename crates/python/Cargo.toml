@@ -27,6 +27,7 @@ bincode = "1.3"
 hex = "0.4"
 indexmap = { version = "2.0", features = ["serde"] }
 tiny-keccak = { version = "2.0", features = ["keccak"] }
+storage_layout_extractor = { path = "../../submodules/storage-layout-extractor", default-features = false }
 lmdb-rkv = "0.14"
 directories-next = "2.0"
 blake3 = "1.5"

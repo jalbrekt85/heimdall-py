@@ -1,0 +1,3 @@
+[submodule "submodules/storage-layout-extractor"]
+	path = submodules/storage-layout-extractor
+	url = https://github.com/jalbrekt85/storage-layout-extractor-py.git
