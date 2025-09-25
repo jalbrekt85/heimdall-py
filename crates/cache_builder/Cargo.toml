@@ -1,0 +1,66 @@
+[package]
+name = "heimdall-cache-builder"
+description = "High-performance cache builder for Heimdall ABI decompilation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+exclude.workspace = true
+
+[[bin]]
+name = "heimdall-cache-builder"
+path = "src/main.rs"
+
+[dependencies]
+# Core heimdall dependencies
+heimdall-decompiler = { workspace = true }
+heimdall-common = { workspace = true }
+heimdall-core = { workspace = true }
+alloy-json-abi = { workspace = true }
+storage_layout_extractor = { path = "../../submodules/storage-layout-extractor", default-features = false }
+
+# Parallelization and async
+tokio = { workspace = true, features = ["full", "rt-multi-thread"] }
+rayon = "1.10"
+crossbeam-channel = "0.5"
+num_cpus = "1.16"
+
+# Data processing
+arrow = { version = "53", features = ["prettyprint"] }
+parquet = { version = "53", features = ["arrow", "async"] }
+
+# Cache and serialization
+lmdb-rkv = "0.14"
+blake3 = "1.5"
+bincode = "1.3"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# CLI and monitoring
+clap = { workspace = true, features = ["derive"] }
+indicatif = "0.17"
+colored = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Utilities
+hex = "0.4"
+indexmap = { version = "2.0", features = ["serde"] }
+tiny-keccak = { version = "2.0", features = ["keccak"] }
+once_cell = "1.19"
+lazy_static = "1.4"
+eyre = { workspace = true }
+bytes = { workspace = true }
+directories-next = "2.0"
+
+# Performance monitoring
+memory-stats = { workspace = true }
+
+[profile.release]
+strip = "debuginfo"
+lto = "fat"
+codegen-units = 1
+opt-level = 3
