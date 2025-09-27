@@ -247,3 +247,24 @@ def get_cache_stats() -> dict:
         >>> print(f"Total hits: {stats['hits']}")
     """
     ...
+
+def cleanup_cache_readers() -> int:
+    """
+    Clean up stale reader slots in the LMDB cache.
+
+    This function removes reader table entries for processes that have
+    terminated without properly closing their reader transaction. This is
+    useful in multiprocessing scenarios where processes may crash or be killed.
+
+    Returns:
+        Number of stale reader slots that were cleaned up.
+
+    Raises:
+        RuntimeError: If cache is not initialized or cleanup fails.
+
+    Example:
+        >>> # Clean up zombie readers
+        >>> cleaned = cleanup_cache_readers()
+        >>> print(f"Cleaned up {cleaned} stale readers")
+    """
+    ...

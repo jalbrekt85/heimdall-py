@@ -26,6 +26,9 @@ pub struct AbiCache {
 }
 
 impl AbiCache {
+    const MAX_READERS: u32 = 126976;
+    const MAP_SIZE: usize = 1024 * 1024 * 1024 * 1024;  // 1TB
+
     pub fn init(directory: Option<PathBuf>, enabled: bool) -> Result<(), String> {
         {
             let cache = CACHE.read().unwrap();
@@ -47,13 +50,15 @@ impl AbiCache {
 
         let cache_path = cache_dir.join("heimdall_abi_cache.mdb");
 
-        let env = Environment::new()
-            .set_flags(EnvironmentFlags::NO_SUB_DIR)
-            .set_map_size(1024 * 1024 * 1024 * 1024)  // 1TB map size - just virtual address space
-            .set_max_readers(8192)
-            .set_max_dbs(1)
-            .open(&cache_path)
-            .map_err(|e| format!("Failed to open LMDB environment: {}", e))?;
+        let env = match Self::open_env(&cache_path) {
+            Ok(env) => env,
+            Err(e) if e.to_string().contains("MDB_READERS_FULL") => {
+                Self::cleanup_stale_readers(&cache_path)?;
+                Self::open_env(&cache_path)
+                    .map_err(|e| format!("Failed to open database after cleanup: {}", e))?
+            }
+            Err(e) => return Err(format!("Failed to open database: {}", e))
+        };
 
         let db = env.open_db(None)
             .map_err(|e| format!("Failed to open database: {}", e))?;
@@ -68,6 +73,15 @@ impl AbiCache {
         *cache = Some(Arc::new(cache_instance));
 
         Ok(())
+    }
+
+    fn open_env(path: &PathBuf) -> Result<Environment, lmdb::Error> {
+        Environment::new()
+            .set_flags(EnvironmentFlags::NO_SUB_DIR)
+            .set_map_size(Self::MAP_SIZE)
+            .set_max_readers(Self::MAX_READERS)
+            .set_max_dbs(1)
+            .open(path)
     }
 
     fn generate_cache_key(bytecode: &str, skip_resolving: bool) -> Vec<u8> {
@@ -164,6 +178,47 @@ impl AbiCache {
     pub fn is_enabled() -> bool {
         let cache_guard = CACHE.read().unwrap();
         cache_guard.as_ref().map(|c| c.enabled).unwrap_or(false)
+    }
+
+    fn cleanup_stale_readers(cache_path: &PathBuf) -> Result<(), String> {
+        let env = Self::open_env(cache_path)
+            .map_err(|e| format!("Failed to open for cleanup: {}", e))?;
+
+        // Use unsafe to call the sys binding
+        let mut dead: std::os::raw::c_int = 0;
+        let result = unsafe {
+            lmdb_sys::mdb_reader_check(env.env(), &mut dead)
+        };
+
+        if result != 0 {
+            return Err(format!("Failed to cleanup readers: error code {}", result));
+        }
+
+        if dead > 0 {
+            eprintln!("Cleaned up {} stale reader slots from cache", dead);
+        }
+
+        Ok(())
+    }
+
+    pub fn cleanup_readers() -> Result<u32, String> {
+        let cache_handle = {
+            let cache_guard = CACHE.read().unwrap();
+            cache_guard.as_ref()
+                .ok_or_else(|| "Cache not initialized".to_string())?
+                .clone()
+        };
+
+        let mut dead: std::os::raw::c_int = 0;
+        let result = unsafe {
+            lmdb_sys::mdb_reader_check(cache_handle.env.env(), &mut dead)
+        };
+
+        if result != 0 {
+            return Err(format!("Failed to cleanup readers: error code {}", result));
+        }
+
+        Ok(dead as u32)
     }
 }
 

@@ -1036,6 +1036,13 @@ fn get_cache_stats(py: Python<'_>) -> PyResult<PyObject> {
     Ok(dict.into())
 }
 
+#[pyfunction]
+fn cleanup_cache_readers(_py: Python<'_>) -> PyResult<u32> {
+    let cleaned = cache::AbiCache::cleanup_readers()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to cleanup cache readers: {}", e)))?;
+    Ok(cleaned)
+}
+
 #[pymodule]
 fn heimdall_py(_py: Python, m: &PyModule) -> PyResult<()> {
     // Initialize tracing if RUST_LOG is set
@@ -1054,6 +1061,7 @@ fn heimdall_py(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(configure_cache, m)?)?;
     m.add_function(wrap_pyfunction!(clear_cache, m)?)?;
     m.add_function(wrap_pyfunction!(get_cache_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(cleanup_cache_readers, m)?)?;
     m.add("DecompileError", _py.get_type::<DecompileError>())?;
     m.add("DecompileTimeoutError", _py.get_type::<DecompileTimeoutError>())?;
     Ok(())

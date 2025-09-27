@@ -29,6 +29,7 @@ indexmap = { version = "2.0", features = ["serde"] }
 tiny-keccak = { version = "2.0", features = ["keccak"] }
 storage_layout_extractor = { path = "../../submodules/storage-layout-extractor", default-features = false }
 lmdb-rkv = "0.14"
+lmdb-rkv-sys = "0.11"
 directories-next = "2.0"
 blake3 = "1.5"
 lazy_static = "1.4"
